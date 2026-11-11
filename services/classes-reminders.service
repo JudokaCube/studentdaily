@@ -1,5 +1,5 @@
 [Unit]
-Description=Classes five-minute reminders with Zoom actions
+Description=StudentDaily class reminders with Zoom actions
 After=graphical-session.target
 PartOf=graphical-session.target
 

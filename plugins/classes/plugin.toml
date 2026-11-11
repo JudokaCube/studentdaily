@@ -2,7 +2,7 @@ id = "nord-desktop/classes"
 name = "StudentDaily"
 version = "1.0.0"
 plugin_api = 32
-author = "nord-desktop"
+author = "jdkcube"
 description = "Compact class schedule that expands on hover"
 icon = "calendar"
 [[widget]]

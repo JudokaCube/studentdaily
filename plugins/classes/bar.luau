@@ -1,5 +1,5 @@
 -- Calendar icon at rest; gently reveal the live schedule on hover.
-local label = "Classes"
+local label = "StudentDaily"
 local progress = 0
 local target = 0
 local hovering = false
@@ -23,14 +23,14 @@ local function poll()
         busy = false
         local data = result.exitCode == 0 and noctalia.json.decode(result.stdout) or nil
         if data and type(data) == "table" then
-            label = data.text or "Classes"
+            label = data.text or "StudentDaily"
             expandUntil = data.expandUntil or 0
             barWidget.setColor(data.textColor or "#88c0d0")
             barWidget.setGlyphColor(data.glyphColor or "#88c0d0")
             barWidget.setTooltip(data.tips)
         else
             label = "Open schedule"
-            barWidget.setTooltip("Click to open Classes")
+            barWidget.setTooltip("Click to open StudentDaily")
         end
         render()
     end, 5000)

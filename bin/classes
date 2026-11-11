@@ -468,7 +468,7 @@ def import_bundle(path,mode='merge'):
 
 def data_menu():
     from pathlib import Path
-    print('CLASSES DATA · schedule, teachers, meeting links, tasks, timezones and theme')
+    print('STUDENTDAILY DATA · schedule, teachers, meeting links, tasks, timezones and theme')
     action=input('[E] Export  [I] Import  [Enter] Back: ').strip().lower()
     if action=='e':
         value=input('Export JSON path [~/Downloads/classes-export.json]: ').strip() or '~/Downloads/classes-export.json'
@@ -479,7 +479,7 @@ def data_menu():
         value=input('Import JSON path (Enter cancels): ').strip()
         if not value:return
         mode=input('[M] Merge with current data (default) / [R] Replace current data: ').strip().lower()
-        if mode=='r' and input('Replace current Classes data with the file? [y/N]: ').lower()!='y':return
+        if mode=='r' and input('Replace current StudentDaily data with the file? [y/N]: ').lower()!='y':return
         import_bundle(Path(value).expanduser(),'replace' if mode=='r' else 'merge');print('Import complete.')
     else:return
     input('Press Enter to return…')
@@ -904,7 +904,7 @@ def build_output(positional, at):
 def pin(interval):
     term = os.environ.get("TERMINAL", "")
     options = [
-        ("kitty", ["kitty", "--class", "classes", "--title", "Classes", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
+        ("kitty", ["kitty", "--class", "classes", "--title", "StudentDaily", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
         ("foot", ["foot", "--app-id=class-watch", "--window-size-chars=90x20", SELF, "menu"]),
     ]
     chosen = None
@@ -1368,7 +1368,7 @@ def widget_status(now=None):
     soon = [hm(e["start"])*60-seconds for e in dated_events
             if 0 < hm(e["start"])*60-seconds <= max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))*60]
     expand_until = int(now.timestamp()+min(soon)) if soon else 0
-    tips = [["CLASSES", now.strftime("%A · %d %B")]]
+    tips = [["STUDENTDAILY", now.strftime("%A · %d %B")]]
     if class_progress is not None:
         tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
     for start, end, subject in events:
@@ -1521,7 +1521,7 @@ def control_key_at(x, y, cols):
     return None
 
 
-HELP_TEXT = """CLASSES / QUICK GUIDE
+HELP_TEXT = """STUDENTDAILY / QUICK GUIDE
 
 Click controls or use the highlighted keys. Mouse wheel / arrows scroll.
 Click a class with [Join] to open Zoom. Tab selects a class; Enter joins.
