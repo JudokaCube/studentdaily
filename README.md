@@ -1,49 +1,49 @@
-# studentdaily
+# StudentDaily
 
-customizable terminal app and desktop widget. mit licensed. public releases start without personal data.
+Customizable terminal app and desktop widget. MIT licensed. Public releases start without personal data.
 
-## install
+## Install
 
-requires linux, python 3.11+, kitty and systemd. reminders use python-dbus and python-gobject.
+Requires Linux, Python 3.11+, Kitty and systemd. Reminders use python-dbus and python-gobject.
 
 ```sh
 python3 build-release.py
 bash release/install.sh
 ```
 
-for a downloaded installer, run `bash install.sh`. setup offers theme, opacity, bar, position, aliases and reminders. existing data is preserved; no keybindings are added. `--help` lists flags; `--yes` uses defaults/flags without questions.
+For a downloaded installer, run `bash install.sh`. Setup offers theme, opacity, bar, position, aliases and reminders. Existing data is preserved; no keybindings are added. `--help` lists flags; `--yes` uses defaults/flags without questions.
 
-## bars
+## Bars
 
-- noctalia 5.3+: native plugins, enabled automatically
-- waybar: native custom modules; existing json/jsonc values are preserved, formatting/comments are rewritten. restart waybar after installation
-- caelestia: requires an editable shell checkout via `--caelestia-root`; setup adds the supplied qml widget to its bar. restart that shell afterward. system-owned files are not changed
-- none: apps and optional background services only
+- Noctalia 5.3+: native plugins, enabled automatically.
+- Waybar: native custom modules; existing JSON/JSONC values are preserved, formatting/comments are rewritten. Restart Waybar after installation.
+- Caelestia: requires an editable shell checkout via `--caelestia-root`; setup adds the supplied QML widget to its bar. Restart that shell afterward. System-owned files are not changed.
+- None: apps and optional background services only.
 
-right-click opens fresh app code. widget styles follow the shared theme. waybar uses tooltips for hover details; caelestia uses a tooltip and progress strip. shell-native notification alignment remains controlled by the shell.
+Right-click opens fresh app code. Widget styles follow the shared theme. Waybar uses tooltips for hover details; Caelestia uses a tooltip and progress strip. Shell-native notification alignment remains controlled by the shell.
 
-## studentdaily
+## StudentDaily
 
-run `classes` or `python3 bin/classes`. click controls; arrows/wheel scroll; tab selects.
+Run `classes` or `python3 bin/classes`. Click controls; arrows/wheel scroll; Tab selects.
 
-- schedule: subjects, teachers, times, zoom links, and once/future/all edits
-- zones: add, edit, remove extra clocks; class times stay local
-- search: classes, teachers and tasks
-- data: export/import schedule, teachers, links, tasks, clocks, completion and theme; merge or replace
-- finish (m): end today’s selected class early; press again to undo
-- to-do: daily school/life tasks; h lists all controls
+- Schedule: subjects, teachers, times, Zoom links, and once/future/all edits.
+- Zones: add, edit, remove extra clocks; class times stay local.
+- Search: classes, teachers and tasks.
+- Data: export/import schedule, teachers, links, tasks, clocks, completion and theme; merge or replace.
+- Finish (m): end today’s selected class early; press again to undo.
+- To-do: daily school/life tasks; h lists all controls.
 
-week view is monday–friday. reminders and progress follow today’s unfinished classes. setup offers empty, customize now, or private preset import. exports contain meeting links; keep private data off github.
+Week view is Monday–Friday. Reminders and progress follow today’s unfinished classes. Setup offers empty, customize now, or private preset import. Exports contain meeting links; keep private data off GitHub.
 
-## appearance and development
+## Appearance and development
 
-open theme/appearance for nine palettes. arrows preview, enter/click saves, esc cancels, n resets nord. opacity defaults to 94%. reopen windows after code or launch-setting changes. settings respect xdg directories; runtime data stays outside the source tree.
+Open theme/appearance for nine palettes. Arrows preview, Enter/click saves, Esc cancels, n resets Nord. Opacity defaults to 94%. Reopen windows after code or launch-setting changes. Settings respect XDG directories; runtime data stays outside the source tree.
 
-`bin/` apps, `plugins/` noctalia widgets, `integrations/` other bars, `services/` startup, `packaging/` installer.
+`bin/` apps, `plugins/` Noctalia widgets, `integrations/` other bars, `services/` startup, `packaging/` installer.
 
 ```sh
 noctalia plugins lint plugins/*
 python3 build-release.py
 ```
 
-rebuild after edits. upload this source folder, including `.gitignore`, and attach `release.tar.gz` to releases. files starting `private-` are personal copies, not public releases.
+Rebuild after edits. Upload this source folder, including `.gitignore`, and attach `release.tar.gz` to releases. Files starting `PRIVATE-` are personal copies, not public releases.
