@@ -1,6 +1,6 @@
 # StudentDaily
 
-Customizable terminal app and desktop widget. MIT licensed. Public releases start without personal data.
+Organize classes, personal events and daily tasks, with reminders and a desktop widget.
 
 ## Install
 
@@ -26,14 +26,15 @@ Right-click opens fresh app code. Widget styles follow the shared theme. Waybar 
 
 Run `classes` or `python3 bin/classes`. Click controls; arrows/wheel scroll; Tab selects.
 
-- Schedule: subjects, teachers, times, Zoom links, and once/future/all edits.
+- Schedule: click or use arrows to select events. One form edits type, title, time, repeat days and once/future/all scope; ctrl+s saves, Esc cancels.
+- Personal events: use the selected theme’s secondary accent across the app, notifications and widgets, without teachers or meeting links; reminders, progress and finish work for both types.
 - Zones: add, edit, remove extra clocks; class times stay local.
 - Search: classes, teachers and tasks.
 - Data: export/import schedule, teachers, links, tasks, clocks, completion and theme; merge or replace.
 - Finish (m): end today’s selected class early; press again to undo.
 - To-do: daily school/life tasks; h lists all controls.
 
-Week view is Monday–Friday. Reminders and progress follow today’s unfinished classes. Setup offers empty, customize now, or private preset import. Exports contain meeting links; keep private data off GitHub.
+Week view is Monday–Friday, adding weekend days only when events are scheduled. Reminders and progress follow today’s unfinished events. Setup offers empty, customize now, or private preset import. Exports contain meeting links; keep private data off GitHub.
 
 ## Appearance and development
 

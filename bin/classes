@@ -136,10 +136,16 @@ DATA = DEFAULT_CONFIG
 
 
 def valid_date(value):
+    if not isinstance(value,str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}",value):
+        raise ValueError("Use dates in YYYY-MM-DD format")
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
 def validate_event(event):
+    if not isinstance(event,dict):raise ValueError("Expected an event object")
+    if event.get("kind","class") not in ("class","personal"):raise ValueError("Choose Class or Personal")
+    if event.get("kind")=="personal" and (event.get("teacher") or event.get("url")):
+        raise ValueError("Personal events cannot have teachers or meeting links")
     for key in ("id", "subject", "start", "end"):
         if not isinstance(event.get(key), str) or not event[key].strip():
             raise ValueError(f"Missing {key}")
@@ -169,8 +175,8 @@ def validate_config(data):
     for series in data["series"]:
         validate_event(series)
         if not isinstance(series.get("days"), list) or not series["days"] or any(
-                type(d) is not int or d not in range(5) for d in series["days"]):
-            raise ValueError("Recurring classes must use Monday–Friday")
+                type(d) is not int or d not in range(7 if series.get("kind")=="personal" else 5) for d in series["days"]):
+            raise ValueError("Choose repeat days (classes use Monday–Friday)")
         first = valid_date(series["from"])
         if series.get("until") and valid_date(series["until"]) < first:
             raise ValueError("Invalid recurrence date range")
@@ -196,12 +202,12 @@ def load_config():
         DATA = copy.deepcopy(DEFAULT_CONFIG)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise ValueError(f"Cannot load schedule: {exc}") from exc
-    TEACHERS = {s["subject"]: s.get("teacher", "") for s in DATA["series"]}
+    TEACHERS = {s["subject"]: s.get("teacher", "") for s in DATA["series"] if s.get("kind","class")=="class"}
     SCHEDULE = {}
     for day in DAYS:
         events = events_on(date_for_day(day))
         SCHEDULE[day] = [(e["start"], e["end"], e["subject"]) for e in events]
-        TEACHERS.update({e["subject"]: e.get("teacher", "") for e in events})
+        TEACHERS.update({e["subject"]: e.get("teacher", "") for e in events if e.get("kind","class")=="class"})
     TIMETABLE = {day: [(e[2], "") for e in events] for day, events in SCHEDULE.items()}
 
 
@@ -276,7 +282,7 @@ def ask_scope():
     return {"1": "once", "2": "future", "3": "all"}[value]
 
 
-def edit_schedule(initial_date=None):
+def edit_schedule_text(initial_date=None):
     import copy
     data = copy.deepcopy(DATA)
     date = initial_date or datetime.now().date()
@@ -325,15 +331,19 @@ def edit_schedule(initial_date=None):
                     data = apply_event_edit(data, date, old, None, scope)
                     continue
                 event = copy.deepcopy(old)
+                kind=input(f"Type class/personal [{event.get('kind','class')}]: ").strip().lower() or event.get('kind','class')
+                event['kind']=kind
+                if kind=='personal':event.update(teacher='',url='')
                 for key, label in (("subject", "Subject"), ("start", "Start HH:MM"), ("end", "End HH:MM"),
                                    ("teacher", "Teacher"), ("url", "Zoom link (- clears)")):
+                    if kind=="personal" and key in ("teacher","url"):continue
                     current = event.get(key, "")
                     value = input(f"{label} [{current}]: ").strip()
                     if value:
                         event[key] = "" if value == "-" and key in ("url", "teacher") else value
                 if scope != "once":
                     current = ",".join(str(d+1) for d in event.get("days", [date.weekday()]))
-                    value = input(f"Repeat on days 1=Mon ... 5=Fri [{current}]: ").strip() or current
+                    value = input(f"Repeat days 1=Mon ... 7=Sun (classes Mon–Fri) [{current}]: ").strip() or current
                     event["days"] = sorted(set(int(d.strip())-1 for d in value.split(",")))
                 validate_event(event)
                 if scope == "new":
@@ -347,6 +357,183 @@ def edit_schedule(initial_date=None):
                 print(f"Not changed: {exc}")
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled; nothing saved.")
+
+
+def event_form_rows(event, scope, new=False):
+    rows=[('kind','Type'),('subject','Title')]
+    if new:rows.append(('date','Date YYYY-MM-DD'))
+    rows += [('start','Start HH:MM'),('end','End HH:MM'),('scope','Repeats' if new else 'Apply to')]
+    if scope!='once':rows += [('day'+str(i),DAYS[i].capitalize()) for i in range(7 if event.get('kind')=='personal' else 5)]
+    if event.get('kind','class')=='class':rows += [('teacher','Teacher'),('url','Meeting link')]
+    rows += [('save','Save event')]
+    if not new:rows += [('delete','Delete event')]
+    rows += [('cancel','Cancel')]
+    return rows
+
+
+def commit_event(data, date, old, event, scope, new=False, delete=False):
+    import copy
+    event=copy.deepcopy(event)
+    if event.get('kind')=='personal':event.update(teacher='',url='')
+    validate_event(event)
+    if new:
+        result=copy.deepcopy(data)
+        if scope=='once':result['exceptions'].setdefault(date.isoformat(),{})[event['id']]=event
+        elif scope=='new':
+            event.update({'from':date.isoformat(),'until':None})
+            result['series'].append(event)
+        else:raise ValueError('Choose once or weekly for a new event')
+        return validate_config(result)
+    return apply_event_edit(data,date,old,None if delete else event,scope)
+
+
+def edit_schedule(initial_date=None):
+    """Mouse/keyboard editor with one form and explicit save, no prompt chain."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return edit_schedule_text(initial_date)
+    import curses,copy
+    def screen(win):
+        curses.raw();curses.curs_set(0);win.keypad(True);curses.start_color();curses.use_default_colors()
+        curses.mousemask(curses.ALL_MOUSE_EVENTS);curses.mouseinterval(0)
+        nord_theme.curses_colors(curses,win)
+        date=initial_date or datetime.now().date();selected=0;offset=0;message='';date_input=None;restore=False
+        def put(y,text,style=0):
+            h,w=win.getmaxyx()
+            if 0<=y<h-1:
+                try:win.addnstr(y,2,text,max(0,w-4),style)
+                except curses.error:pass
+        def keypress():
+            try:return win.get_wch()
+            except curses.error:return ''
+        def click(key):
+            if key!=curses.KEY_MOUSE:return None
+            try:
+                _,x,y,_,state=curses.getmouse()
+                if state & curses.BUTTON4_PRESSED:return ('up',0)
+                if state & getattr(curses,'BUTTON5_PRESSED',0):return ('down',0)
+                if state & (curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED):return ('click',y)
+            except curses.error:pass
+            return None
+        def form(old=None):
+            new=old is None
+            event=copy.deepcopy(old) if old else {'id':new_id(),'subject':'','kind':'class','start':'09:00','end':'09:30','teacher':'','url':'','days':[date.weekday()]}
+            event.setdefault('kind','class')
+            stamp=date.isoformat();scope='once';focus=0;scroll=0;notice='';confirm=False;replace=True
+            repeat=any(s['id']==event['id'] for s in DATA['series'])
+            scopes=['once','new'] if new else ['once','future','all'] if repeat else ['once']
+            while True:
+                rows=event_form_rows(event,scope,new);focus=min(focus,len(rows)-1)
+                h,w=win.getmaxyx();win.erase()
+                if h<12 or w<45:
+                    put(1,'Resize to at least 45 columns × 12 rows.');put(3,'Esc cancels.');win.refresh()
+                    if keypress()=='\x1b':return
+                    continue
+                put(1,'STUDENTDAILY / '+('NEW EVENT' if new else 'EDIT EVENT'),curses.color_pair(1)|curses.A_BOLD)
+                put(2,'Type in fields · Tab/↑↓ move · ←→ changes choices')
+                size=h-8;scroll=min(scroll,focus)
+                if focus>=scroll+size:scroll=focus-size+1
+                for j,(field,label) in enumerate(rows[scroll:scroll+size],scroll):
+                    if field=='date':value=stamp
+                    elif field=='kind':value='Personal · theme accent' if event['kind']=='personal' else 'Class'
+                    elif field=='scope':value={'once':'This date only','new':'Weekly','future':'This and following','all':'All occurrences'}[scope]
+                    elif field.startswith('day'):value='[x]' if int(field[3:]) in event['days'] else '[ ]'
+                    elif field in ('save','delete','cancel'):value=''
+                    else:value=event.get(field,'') or '—'
+                    put(4+j-scroll,('› ' if focus==j else '  ')+label+('  '+value if value else ''),curses.color_pair(2) if focus==j else curses.color_pair(4) if event['kind']=='personal' else 0)
+                put(h-3,notice or ('Enter toggles choices · Ctrl+S saves · Esc cancels'),curses.color_pair(1))
+                put(h-2,f'{focus+1}/{len(rows)} · Click a field to edit; click Save when ready')
+                win.refresh();key=keypress();mouse=click(key)
+                if mouse:
+                    action,y=mouse
+                    if action in ('up','down'):key=curses.KEY_UP if action=='up' else curses.KEY_DOWN
+                    elif 4<=y<4+min(size,len(rows)-scroll):
+                        focus=scroll+y-4;replace=True;key='\n'
+                    else:continue
+                if key in ('\x1b','\x03'):return
+                if key in (curses.KEY_DOWN,'\t',curses.KEY_UP,curses.KEY_BTAB):
+                    focus=(focus+(-1 if key in (curses.KEY_UP,curses.KEY_BTAB) else 1))%len(rows);replace=True;confirm=False;continue
+                field=rows[focus][0]
+                if key=='\x13':field='save';key='\n'
+                activate=key in ('\n','\r',curses.KEY_LEFT,curses.KEY_RIGHT,' ')
+                if field=='kind' and activate:
+                    event['kind']='personal' if event['kind']=='class' else 'class'
+                    if event['kind']=='class':event['days']=[d for d in event['days'] if d<5]
+                    confirm=False
+                elif field=='scope' and activate:scope=scopes[(scopes.index(scope)+(-1 if key==curses.KEY_LEFT else 1))%len(scopes)];confirm=False
+                elif field.startswith('day') and activate:
+                    day=int(field[3:]);event['days']=sorted(set(event['days'])^{day});confirm=False
+                elif field=='cancel' and activate:return
+                elif field in ('save','delete') and activate:
+                    if field=='delete' and not confirm:confirm=True;notice='Delete with this scope? Press Enter or click Delete again.';continue
+                    try:
+                        target=valid_date(stamp) if new else date
+                        candidate=commit_event(DATA,target,old,event,scope,new,field=='delete')
+                        # Refuse to overwrite another open editor's changes.
+                        if (Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b'')!=baseline:raise ValueError('Schedule changed elsewhere. Cancel and reopen this editor.')
+                        save_config(candidate);load_config()
+                        return 'Deleted.' if field=='delete' else 'Saved.'
+                    except (ValueError,OSError,KeyError,TypeError) as exc:notice=str(exc);confirm=False
+                elif field in ('subject','date','start','end','teacher','url'):
+                    value=stamp if field=='date' else event.get(field,'')
+                    if key in ('\n','\r'):replace=True;continue
+                    if key in (curses.KEY_BACKSPACE,'\x7f','\b'):value='' if replace else value[:-1];replace=False
+                    elif key=='\x15':value='';replace=False
+                    elif isinstance(key,str) and key.isprintable():value=key if replace else value+key;replace=False
+                    else:continue
+                    if field=='date':stamp=value
+                    else:event[field]=value
+                    notice='';confirm=False
+        while True:
+            load_config()
+            baseline=Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b''
+            events=events_on(date);h,w=win.getmaxyx();win.erase()
+            if h<12 or w<45:
+                put(1,'Resize to at least 45 columns × 12 rows.');put(3,'Esc returns.');win.refresh()
+                if keypress()=='\x1b':return
+                continue
+            items=[('add',None)]+[('event',e) for e in events]+[('restore',None),('back',None)]
+            selected=min(selected,len(items)-1);size=max(1,h-8);offset=min(offset,selected)
+            if selected>=offset+size:offset=selected-size+1
+            put(1,'STUDENTDAILY / SCHEDULE',curses.color_pair(1)|curses.A_BOLD)
+            put(2,f'{date:%A %d %B %Y}   ← Previous day   Next day →')
+            for i,(kind,e) in enumerate(items[offset:offset+size],offset):
+                label='[ + Add event ]' if kind=='add' else '[ Restore this date ]' if kind=='restore' else '[ Back ]' if kind=='back' else f"{e['start']}–{e['end']}  {e['subject']}  · {'Personal' if e.get('kind')=='personal' else 'Class'}"
+                put(4+i-offset,('› ' if i==selected else '  ')+label,curses.color_pair(2) if i==selected else curses.color_pair(4) if e and e.get('kind')=='personal' else 0)
+            put(h-3,('Date: '+date_input+' · Enter go · Esc cancel') if date_input is not None else message or '↑↓ Select · Enter Edit · A Add · G Date · T Today · Esc Back',curses.color_pair(1))
+            put(h-2,'Each Save applies immediately. Esc discards the open form.')
+            win.refresh();key=keypress();mouse=click(key)
+            if mouse:
+                action,y=mouse
+                if action in ('up','down'):key=curses.KEY_UP if action=='up' else curses.KEY_DOWN
+                elif 4<=y<4+min(size,len(items)-offset):selected=offset+y-4;key='\n'
+                else:continue
+            if date_input is not None:
+                if key=='\x1b':date_input=None
+                elif key in ('\n','\r'):
+                    try:date=valid_date(date_input);date_input=None;selected=offset=0;message=''
+                    except ValueError:date_input='';message='Use YYYY-MM-DD'
+                elif key in (curses.KEY_BACKSPACE,'\x7f','\b'):date_input=date_input[:-1]
+                elif isinstance(key,str) and key.isprintable():date_input+=key
+                continue
+            if key in ('\x1b','\x03','q'):return
+            if key not in ('\n','\r'):restore=False
+            if key=='g':date_input='';continue
+            if key in (curses.KEY_UP,curses.KEY_DOWN,'\t'):
+                selected=(selected+(-1 if key==curses.KEY_UP else 1))%len(items)
+            elif key in (curses.KEY_LEFT,curses.KEY_RIGHT):date+=timedelta(days=-1 if key==curses.KEY_LEFT else 1);selected=offset=0
+            elif key=='t':date=datetime.now().date();selected=offset=0
+            elif key in ('a','\n','\r'):
+                kind,e=('add',None) if key=='a' else items[selected]
+                if kind=='back':return
+                if kind=='restore':
+                    if not restore:restore=True;message='Restore this date? Press Enter again to remove its overrides.';continue
+                    candidate=copy.deepcopy(DATA);candidate['exceptions'].pop(date.isoformat(),None)
+                    save_config(candidate);restore=False;message='Date restored.';continue
+                restore=False
+                message=form(e) or 'Changes cancelled.'
+    from pathlib import Path
+    try:curses.wrapper(screen)
+    except KeyboardInterrupt:pass
 
 
 def load_tasks():
@@ -387,12 +574,12 @@ def task_change(date, action, identity=None, text=None, category="School"):
 
 def search_all(query):
     query=query.casefold().strip()
-    if not query:return ['Type a subject, teacher, task or date.']
+    if not query:return ['Type an event, teacher, task or date.']
     results=[]
     for item in DATA['series']:
         if query in ' '.join(str(item.get(k,'')) for k in ('subject','teacher','start','end')).casefold():
             days=', '.join(DAYS[d][:3].title() for d in item['days'])
-            results.append(f"CLASS   {item['subject']} · {item.get('teacher','')} · {days} {item['start']}–{item['end']}")
+            results.append(f"{'PERSONAL' if item.get('kind')=='personal' else 'CLASS'}   {item['subject']} · {item.get('teacher','')} · {days} {item['start']}–{item['end']}")
     for date,changes in DATA['exceptions'].items():
         for item in changes.values():
             if item and query in (date+' '+item['subject']+' '+item.get('teacher','')).casefold():
@@ -401,7 +588,7 @@ def search_all(query):
         for task in tasks:
             if query in (date+' '+task['text']+' '+task['category']).casefold():
                 results.append(f"TASK    {date} · {task['category']} · {'✓' if task['done'] else '□'} {task['text']}")
-    return results or ['No matching classes, teachers or tasks.']
+    return results or ['No matching events, teachers or tasks.']
 
 
 def export_bundle(path):
@@ -444,7 +631,8 @@ def import_bundle(path,mode='merge'):
     if mode=='replace':schedule=copy.deepcopy(incoming['schedule']);tasks=incoming.get('tasks',{});zones=incoming.get('timezones',[])
     else:
         load_config();schedule=copy.deepcopy(DATA)
-        series={s['id']:s for s in schedule['series']};series.update({s['id']:s for s in incoming['schedule']['series']});schedule['series']=list(series.values())
+        incoming_ids={s['id'] for s in incoming['schedule']['series']}
+        schedule['series']=[s for s in schedule['series'] if s['id'] not in incoming_ids]+copy.deepcopy(incoming['schedule']['series'])
         for date,changes in incoming['schedule']['exceptions'].items():schedule['exceptions'].setdefault(date,{}).update(changes)
         tasks=load_tasks()
         for date,items in incoming.get('tasks',{}).items():
@@ -486,6 +674,7 @@ def data_menu():
 
 
 def open_event(event):
+    if event.get("kind")=="personal":return "Personal event · "+event["subject"]
     url = event.get("url", "").strip()
     if not url:
         return "No Zoom link saved for this class. Add one in Edit."
@@ -602,7 +791,8 @@ def render_week():
     today = day_name(now)
     ns = now_seconds(None)
     parts = []
-    for d in WEEKDAYS:
+    for d in DAYS:
+        if d not in WEEKDAYS and not events_on(date_for_day(d)):continue
         parts.append(render_day(d, ns, d == today))
     return "\n".join(parts)
 
@@ -610,7 +800,8 @@ def render_week():
 def load_state():
     try:
         with open(STATE_FILE) as f:
-            return json.load(f)
+            data=json.load(f)
+        return data if isinstance(data,dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -621,7 +812,9 @@ def completion_file():
 
 def load_completed():
     try:
-        with open(completion_file()) as file:return json.load(file)
+        with open(completion_file()) as file:data=json.load(file)
+        if not isinstance(data,dict):return {}
+        return {date:keys for date,keys in data.items() if isinstance(keys,list) and all(isinstance(k,str) for k in keys)}
     except (OSError,ValueError):return {}
 
 
@@ -692,7 +885,7 @@ def reminder_daemon(once=False):
         actions = ["join", "Join"] if event.get("url") else []
         import html
         body = html.escape(" · ".join(x for x in (event["start"],event.get("teacher", "")) if x))
-        notification = api.Notify("StudentDaily", 0, nord_theme.notification_icon("calendar"),
+        notification = api.Notify("StudentDaily", 0, nord_theme.notification_icon("personal" if event.get("kind")=="personal" else "calendar"),
                                   f"{short_subject(event['subject'])} in {minutes} min", body,
                                   dbus.Array(actions, signature="s"),
                                   dbus.Dictionary({"urgency": dbus.Byte(1)}, signature="sv"),
@@ -763,7 +956,8 @@ def render_now(now_sec, day):
     now=datetime.now()
     if day==day_name(now):
         at=now.replace(hour=now_sec//3600,minute=(now_sec%3600)//60,second=now_sec%60)
-        return c(NOW,widget_status(at)["text"])
+        status=widget_status(at)
+        return c(_fg(status["textColor"]),status["text"])
     now_min = now_sec // 60
     rows = TIMETABLE[day]
     active = []
@@ -787,10 +981,10 @@ def render_now(now_sec, day):
 def render_left(now_sec, day):
     date=date_for_day(day);completed=load_completed()
     events=[event for event in events_on(date) if hm(event['end'])*60>now_sec and not event_finished(event,date,completed)]
-    label='class' if len(events)==1 else 'classes'
+    label='event' if len(events)==1 else 'events'
     out=['  '+c(ACCENT,f'{len(events)} {label} left')]
     for event in events:
-        out.append(f"   {event['start']}–{event['end']}   {event['subject']}  "+c(ROOM,event.get('teacher','')))
+        out.append(c(NEXT if event.get("kind")=="personal" else TEXT,f"   {event['start']}–{event['end']}   {event['subject']}  ")+c(DIM,event.get('teacher','')))
     return '\n'.join(out)
 
 
@@ -1323,11 +1517,17 @@ def timer_loop(arg):
         sys.stdout.flush()
 
 
+_SCHEDULE_STAMP = None
+
 def reload_schedule():
-    global TIMETABLE
-    load_config()
-    TIMETABLE = {day: [(subject, "") for _, _, subject in events]
-                 for day, events in SCHEDULE.items()}
+    global _SCHEDULE_STAMP
+    try:
+        stat=os.stat(CONFIG_FILE)
+        stamp=(CONFIG_FILE,stat.st_mtime_ns,stat.st_size,datetime.now().date())
+    except FileNotFoundError:stamp=(CONFIG_FILE,None,datetime.now().date())
+    if stamp!=_SCHEDULE_STAMP:
+        load_config()
+        _SCHEDULE_STAMP=stamp
 
 
 def short_subject(subject):
@@ -1350,7 +1550,9 @@ def widget_status(now=None):
     color = "#"+palette["dim"]
     class_progress = None
     progress_bar = ""
-    for start, end, subject in events:
+    for event in dated_events:
+        start,end,subject=event["start"],event["end"],event["subject"]
+        personal=event.get("kind")=="personal"
         if hm(start) * 60 <= seconds < hm(end) * 60:
             left = max(1, (hm(end) * 60 - seconds + 59) // 60)
             elapsed = seconds - hm(start) * 60
@@ -1358,12 +1560,12 @@ def widget_status(now=None):
             class_progress = min(99, int(elapsed * 100 / duration))
             progress_bar = progress_meter(class_progress,10)
             text = f"{short_subject(subject)[:16]} {progress_meter(class_progress,8)} {class_progress}%"
-            color = "#"+palette["green"]
+            color = "#"+palette["purple" if personal else "green"]
             break
         if hm(start) * 60 > seconds:
             left = (hm(start) * 60 - seconds + 59) // 60
             text = f"{short_subject(subject)} in {fmt_delta(left)}"
-            color = "#"+palette["accent"]
+            color = "#"+palette["purple" if personal else "accent"]
             break
     soon = [hm(e["start"])*60-seconds for e in dated_events
             if 0 < hm(e["start"])*60-seconds <= max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))*60]
@@ -1371,13 +1573,14 @@ def widget_status(now=None):
     tips = [["STUDENTDAILY", now.strftime("%A · %d %B")]]
     if class_progress is not None:
         tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
-    for start, end, subject in events:
-        tips.append([f"{start}–{end}", f"{short_subject(subject)} · {teacher_of(subject)}".rstrip(" ·")])
+    for event in dated_events:
+        detail="Personal" if event.get("kind")=="personal" else event.get("teacher","")
+        tips.append([f"{event['start']}–{event['end']}", f"{short_subject(event['subject'])} · {detail}".rstrip(" ·")])
     if not events:
-        tips.append(["Today", "No classes scheduled"])
+        tips.append(["Today", "No events scheduled"])
     tips.append(["Click", "Open schedule and menu"])
     return {"visible": True, "glyph": "calendar", "text": text,
-            "textColor": color, "glyphColor": "#"+palette["accent"], "fontWeight": "medium", "tips": tips, "expandUntil": expand_until, "classProgress": class_progress}
+            "textColor": color, "glyphColor": color, "fontWeight": "medium", "tips": tips, "expandUntil": expand_until, "classProgress": class_progress}
 
 
 def clip_ansi(text, width):
@@ -1427,21 +1630,21 @@ def day_panel(date, selected=-1, now_sec=None):
         finished=event_finished(event,date,completed)
         active = is_today and hm(start)*60 <= seconds < hm(end)*60 and not finished
         past = finished or (is_today and hm(end)*60 <= seconds)
-        color = DIM if past else NOW if active else TEXT
+        color = DIM if past else NEXT if event.get("kind")=="personal" else NOW if active else TEXT
         tag = "DONE" if past else "NOW" if active else ""
         marker = "▸" if i == selected else " "
-        join = c(ACCENT, "  [Join]") if event.get("url") else ""
+        join = c(ACCENT, "  [Join]") if event.get("url") and event.get("kind")!="personal" else ""
         targets[1+len(content)] = ("event", event)
         targets[2+len(content)] = ("event", event)
         content.append(c(color, f"{marker} {start}–{end}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
         duration = hm(end)-hm(start)
-        detail = " · ".join(x for x in (event.get("teacher", ""), f"{duration} min") if x)
+        detail = " · ".join(x for x in ("Personal" if event.get("kind")=="personal" else event.get("teacher", ""), f"{duration} min") if x)
         if active:
             left = hm(end)*60-seconds
             percent=min(99,int((duration*60-left)*100/(duration*60)))
             detail += " · " + fmt_delta_sec(left) + " left"
         content.append(c(DIM,"    "+detail))
-        if active:content.append(c(ACCENT,"    "+progress_meter(percent)+f" {percent}%"))
+        if active:content.append(c(color,"    "+progress_meter(percent)+f" {percent}%"))
         content.append("")
     if content:
         content.pop()
@@ -1669,7 +1872,8 @@ def dashboard():
             elif view == "week":
                 lines = []
                 monday = date-timedelta(days=date.weekday())
-                for delta in range(5):
+                for delta in range(7):
+                    if delta>4 and not events_on(monday+timedelta(days=delta)):continue
                     part, hits = day_panel(monday+timedelta(days=delta))
                     targets.update({len(lines)+row: hit for row,hit in hits.items()})
                     lines.extend(part+[""])
@@ -1769,8 +1973,8 @@ def dashboard():
                 event=events[index]
                 if date==now.date() and hm(event['start'])*60<=now_seconds(None):
                     done=toggle_finished(event,date)
-                    notice="Marked finished. Press M on this class to undo." if done else "Class restored."
-                else:notice="Finish is available once a class has started today."
+                    notice="Marked finished. Press M on this event to undo." if done else "Event restored."
+                else:notice="Finish is available once an event has started today."
                 continue
             if key in ("\r","\n","z"):
                 if view=="tasks" and key!="z":
@@ -1835,7 +2039,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key=="y":sys.stdout.write("\033[?1049h")
+                if key in ("y","e"):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass

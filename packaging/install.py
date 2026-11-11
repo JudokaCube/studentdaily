@@ -8,12 +8,16 @@ CONFIG=Path(os.environ.get('XDG_CONFIG_HOME',HOME/'.config'))
 DATA=Path(os.environ.get('XDG_DATA_HOME',HOME/'.local/share'))
 
 def main():
-    parser=argparse.ArgumentParser(description='Install the included Nord apps and widgets. Existing data is preserved.')
+    has_classes=(ROOT/'bin/classes').exists()
+    has_packages=(ROOT/'bin/system-update').exists()
+    app_name='StudentDaily + KeepItNew' if has_classes and has_packages else 'StudentDaily' if has_classes else 'KeepItNew'
+    choices=['both','classes','packages'] if has_classes and has_packages else ['classes'] if has_classes else ['packages']
+    parser=argparse.ArgumentParser(description=f'Install {app_name} and its widgets. Existing data is preserved.')
     parser.add_argument('--setup',choices=['blank','customize','import'])
     parser.add_argument('--preset',type=Path,help='Optional private JSON preset to import on a fresh install')
     parser.add_argument('--no-start',action='store_true')
     parser.add_argument('--bar',choices=['auto','noctalia','waybar','caelestia','none'],default='auto')
-    parser.add_argument('--components',choices=['both','classes','packages'])
+    parser.add_argument('--components',choices=choices,help='Choose apps included in this installer' if len(choices)>1 else argparse.SUPPRESS)
     parser.add_argument('--position',choices=['auto','start','center','end'],default='auto')
     parser.add_argument('--waybar-config',type=Path)
     parser.add_argument('--caelestia-root',type=Path)
@@ -34,7 +38,7 @@ def main():
     import nord_theme
     interactive=sys.stdin.isatty() and not args.yes
     if interactive:
-        print('StudentDaily / KeepItNew · customize installation')
+        print(app_name+' · customize installation')
         if has_classes and has_packages and args.components is None:
             args.components={'2':'classes','3':'packages'}.get(input('Apps: 1 Both, 2 StudentDaily, 3 KeepItNew [1]: ').strip(),'both')
         if args.bar=='auto':args.bar={'1':'noctalia','2':'waybar','3':'caelestia','4':'none'}.get(input('Bar: 1 Noctalia, 2 Waybar, 3 Caelestia, 4 No bar [1]: ').strip(),'noctalia')
@@ -84,7 +88,7 @@ def main():
     if has_packages and not (shutil.which('checkupdates') or shutil.which('fakeroot')):parser.error('Install pacman-contrib or fakeroot for update checks.')
     setup=args.setup or ('import' if args.preset else None)
     if has_classes and setup is None and interactive:
-        print('Classes setup: 1 Empty (edit later) · 2 Customize now · 3 Import a private preset')
+        print('StudentDaily setup: 1 Empty (edit later) · 2 Customize now · 3 Import a private preset')
         setup={'2':'customize','3':'import'}.get(input('Choose [1]: ').strip(),'blank')
     setup=setup or 'blank'
     preset=None
@@ -110,7 +114,7 @@ def main():
             if folder=='services' and ((file.name.startswith('classes') and not has_classes) or (file.name.startswith('system-update') and not has_packages)):continue
             copy(file,target/file.relative_to(ROOT/folder))
     if has_classes:
-        for alias in ('class','today'):
+        for alias in (() if args.no_aliases else ('class','today')):
             link=HOME/'.local/bin'/alias
             if link.exists() or link.is_symlink():link.unlink()
             link.symlink_to('classes')
@@ -127,7 +131,9 @@ def main():
     if preset and 'theme' in preset:
         path=CONFIG/'nord-desktop/appearance.json';path.parent.mkdir(parents=True,exist_ok=True)
         if not path.exists():path.write_text(json.dumps({'theme':preset['theme']})+'\n');path.chmod(0o600)
-    preferences=dict(nord_theme.preferences());preferences.update(bar=args.bar,reminders=not args.no_reminders,reminder_minutes=args.reminder_minutes,check_minutes=args.check_minutes,auto_confirm=not args.confirm_updates)
+    preferences=dict(nord_theme.preferences());preferences.update(bar=args.bar)
+    if has_classes:preferences.update(reminders=not args.no_reminders,reminder_minutes=args.reminder_minutes)
+    if has_packages:preferences.update(check_minutes=args.check_minutes,auto_confirm=not args.confirm_updates)
     if args.opacity is not None:preferences['opacity']=args.opacity
     pref=CONFIG/'nord-desktop/preferences.json';pref.parent.mkdir(parents=True,exist_ok=True);pref.write_text(json.dumps(preferences,indent=2)+'\n')
     if args.theme:nord_theme.save(args.theme)
@@ -154,7 +160,7 @@ def main():
     if has_classes and setup=='customize':
         subprocess.run([str(HOME/'.local/bin/classes'),'timezones'])
         subprocess.run([str(HOME/'.local/bin/classes'),'edit'])
-    if has_classes:print('Classes: use Schedule for subjects, teachers, times and links; Timezones for clocks.')
-    if has_packages:print('Updates: run update; arrows/click select, Space toggles cleanup items.')
+    if has_classes:print('StudentDaily: Schedule edits classes and personal events; Zones edits clocks.')
+    if has_packages:print('KeepItNew: run update; arrows/click select, Space toggles cleanup items.')
 
 if __name__=='__main__':main()

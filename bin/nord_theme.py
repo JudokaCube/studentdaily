@@ -21,7 +21,7 @@ def current():
   if _THEME_CACHE.get('stamp')!=stamp:_THEME_CACHE.update(stamp=stamp,name=json.loads(SETTINGS.read_text()).get('theme','Nord'))
   name=_THEME_CACHE['name']
  except (OSError,ValueError,AttributeError):name='Nord'
- return name if name in THEMES else 'Nord'
+ return name if isinstance(name,str) and name in THEMES else 'Nord'
 
 def palette(name=None):return dict(zip(('background','text','accent','purple','dim','surface','green','red'),THEMES[name or current()]))
 
@@ -35,11 +35,25 @@ def save(name):
 def curses_colors(curses,win,name=None):
  p=palette(name)
  try:
+  # Define useful pairs even on terminals without mutable RGB colors.
+  for pair,fg,bg in ((1,curses.COLOR_CYAN,-1),(2,curses.COLOR_WHITE,curses.COLOR_BLUE),
+                     (3,curses.COLOR_WHITE,-1),(4,curses.COLOR_MAGENTA,-1)):
+   curses.init_pair(pair,fg,bg)
   if curses.can_change_color() and curses.COLORS>21:
-   for i,key in enumerate(('accent','text','surface','background'),16):
+   for i,key in enumerate(('accent','text','surface','background','purple'),16):
     color=p[key];curses.init_color(i,*(round(int(color[n:n+2],16)*1000/255) for n in (0,2,4)))
-   curses.init_pair(1,16,19);curses.init_pair(2,17,18);curses.init_pair(3,17,19)
-   win.bkgd(' ',curses.color_pair(3))
+   curses.init_pair(1,16,19);curses.init_pair(2,17,18);curses.init_pair(3,17,19);curses.init_pair(4,20,19)
+  elif curses.COLORS>=256:
+   def nearest(value):
+    rgb=[int(value[i:i+2],16) for i in (0,2,4)]
+    levels=(0,95,135,175,215,255)
+    candidates=[(16+36*r+6*g+b,(levels[r],levels[g],levels[b])) for r in range(6) for g in range(6) for b in range(6)]
+    candidates += [(232+i,(8+i*10,)*3) for i in range(24)]
+    return min(candidates,key=lambda c:sum((a-b)**2 for a,b in zip(rgb,c[1])))[0]
+   colors={key:nearest(value) for key,value in p.items()}
+   for pair,fg,bg in ((1,'accent','background'),(2,'text','surface'),(3,'text','background'),(4,'purple','background')):
+    curses.init_pair(pair,colors[fg],colors[bg])
+  win.bkgd(' ',curses.color_pair(3))
  except curses.error:pass
 
 def picker():
@@ -91,7 +105,7 @@ def opacity():
  except (TypeError,ValueError):return .94
 
 def notification_icon(kind='calendar'):
- color=palette()['accent'];cache=Path(os.environ.get('XDG_CACHE_HOME',Path.home()/'.cache'))/'studentdaily-icons'
+ color=palette()['purple' if kind=='personal' else 'accent'];cache=Path(os.environ.get('XDG_CACHE_HOME',Path.home()/'.cache'))/'studentdaily-icons'
  cache.mkdir(parents=True,exist_ok=True);path=cache/(kind+'-'+color+'.svg')
  if not path.exists():
   # A monochrome vector stays clean at notification icon sizes.
