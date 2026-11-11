@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta
 
 SELF = os.path.abspath(__file__)
-SCHEDULE_IMG = os.path.expanduser("~/School/Misc/schedule.png")
+SCHEDULE_IMG = os.path.expanduser("~/.config/class-command/schedule.png")
 STATE_FILE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
     "class",
@@ -31,68 +31,11 @@ PERIODS = [
     ("14:40", "15:30"),
 ]
 
-TEACHERS = {
-    "form tutor": "naria saghatelyan",
-    "french": "hranush gyurjinyan",
-    "chemistry": "karine hakobyan",
-    "geography": "armine saghatelyan",
-    "math": "ilshat agaltdinov",
-    "physics": "mannoj raj",
-    "ict": "armine saghatelyan",
-    "pe": "aram melikyan",
-    "pshe": "naira saghatelyan",
-    "assembly": "naira saghatelyan",
-    "history": "james barret",
-    "english": "edward phebus",
-}
+# Personal teacher names and timetable removed for public archival use.
+# Restore your private timetable locally if you want live class tracking.
+TEACHERS = {}
 
-TIMETABLE = {
-    "monday": [
-        ("french", "47"),
-        ("chemistry", "43"),
-        ("geography", "49"),
-        ("math", "1"),
-        ("english", "42"),
-        ("ict", "1"),
-        ("ict", "1"),
-    ],
-    "tuesday": [
-        ("english", "42"),
-        ("chemistry", "38"),
-        ("physics", "37"),
-        ("math", "41"),
-        ("geography", "46"),
-        ("history", "37"),
-        ("history", "37"),
-    ],
-    "wednesday": [
-        ("english", "41"),
-        ("english", "41"),
-        ("math", "41"),
-        ("history", "37"),
-        ("french", "41"),
-        ("physics", "38"),
-        ("pshe", "??"),
-    ],
-    "thursday": [
-        ("math", "1"),
-        ("geography", "1"),
-        ("french", "47"),
-        ("english", "41"),
-        ("ict", "1"),
-        ("chemistry", "43"),
-        ("assembly", "17 tent"),
-    ],
-    "friday": [
-        ("english", "41"),
-        ("pe", "gym"),
-        ("pe", "gym"),
-        ("pe", "gym"),
-        ("physics", "38"),
-        ("ict", "1"),
-        ("french", "45"),
-    ],
-}
+TIMETABLE = {day: [None] * len(PERIODS) for day in DAYS}
 
 USE_COLOR = sys.stdout.isatty()
 
@@ -251,8 +194,8 @@ def teacher_of(subject):
     return TEACHERS.get(subject, "")
 
 
-    rows = TIMETABLE[day]
 def render_day(day, now_sec, is_today, note=""):
+    rows = TIMETABLE[day]
     now_min = now_sec // 60
     now_idx = None
     next_idx = None
@@ -316,7 +259,7 @@ def render_day(day, now_sec, is_today, note=""):
             left = hm(PERIODS[next_idx][0]) * 60 - now_sec
             det = " · ".join(
                 x for x in [s, t, f"room {r}" if r else "", f"in {fmt_delta_sec(left)}"] if x
-            )d
+            )
             out.append("  " + c(NEXT, "next ") + det)
         if now_idx is None and next_idx is None:
             out.append("  " + c(DIM, "done for the day"))
