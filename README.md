@@ -1,17 +1,17 @@
 # studentdaily
 
-customizable terminal apps and desktop widgets. mit licensed. public releases start without personal data.
+customizable terminal app and desktop widget. mit licensed. public releases start without personal data.
 
 ## install
 
-requires linux, python 3.11+, kitty and systemd. packages uses arch/pacman, flatpak and checkupdates or fakeroot; yay/paru adds aur. reminders use python-dbus and python-gobject.
+requires linux, python 3.11+, kitty and systemd. reminders use python-dbus and python-gobject.
 
 ```sh
 python3 build-release.py
 bash release/install.sh
 ```
 
-for a downloaded installer, run `bash install.sh`. setup offers apps, theme, opacity, bar, position, aliases, reminders, check interval and package confirmations. existing data is preserved; no keybindings are added. `--help` lists flags; `--yes` uses defaults/flags without questions.
+for a downloaded installer, run `bash install.sh`. setup offers theme, opacity, bar, position, aliases and reminders. existing data is preserved; no keybindings are added. `--help` lists flags; `--yes` uses defaults/flags without questions.
 
 ## bars
 
@@ -37,7 +37,7 @@ week view is monday–friday. reminders and progress follow today’s unfinished
 
 ## appearance and development
 
-open theme/appearance for nine palettes. arrows preview, enter/click saves, esc cancels, n resets nord. opacity defaults to 94%. reopen windows after code or launch-setting changes. settings respect xdg directories under `classes` and `nord-desktop`; runtime data stays outside the source tree.
+open theme/appearance for nine palettes. arrows preview, enter/click saves, esc cancels, n resets nord. opacity defaults to 94%. reopen windows after code or launch-setting changes. settings respect xdg directories; runtime data stays outside the source tree.
 
 `bin/` apps, `plugins/` noctalia widgets, `integrations/` other bars, `services/` startup, `packaging/` installer.
 
