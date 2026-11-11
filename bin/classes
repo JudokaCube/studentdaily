@@ -1,0 +1,1912 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+# Load the shared module beside this executable, including standalone source runs.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import nord_theme
+from zoneinfo import ZoneInfo
+
+SELF = os.path.realpath(__file__)
+STATE_FILE = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "class",
+    "notified.json",
+)
+
+LEAD_MIN = 5
+WATCH_INTERVAL = 1
+
+DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+WEEKDAYS = DAYS[:5]
+
+# Monday–Sunday; title times take precedence; durations are customized.
+SCHEDULE = {day: [] for day in DAYS}
+TEACHERS = {}
+
+DEFAULT_LINKS = {}
+CONFIG_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "classes", "schedule.json",
+)
+TASK_FILE = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+                         "classes", "tasks.json")
+
+
+def atomic_json(path, data):
+    import tempfile
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as f:
+            temp = f.name
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(temp, path)
+    finally:
+        if temp and os.path.exists(temp):
+            os.unlink(temp)
+
+
+TIMEZONE_FILE = os.path.join(os.path.dirname(CONFIG_FILE), 'timezones.json')
+DEFAULT_TIMEZONES = []
+
+
+def load_timezones():
+    try:
+        with open(TIMEZONE_FILE) as f:zones=json.load(f)
+    except FileNotFoundError:return list(DEFAULT_TIMEZONES)
+    if not isinstance(zones,list):raise ValueError('Timezones must be a list')
+    for item in zones:
+        if not isinstance(item.get('label'),str) or not item['label'].strip():raise ValueError('Timezone label required')
+        ZoneInfo(item['zone'])
+    return zones
+
+
+def timezone_text(now):
+    parts=[f'Local {now.astimezone():%H:%M %Z}']
+    for item in load_timezones():
+        parts.append(f"{item['label']} {now.astimezone(ZoneInfo(item['zone'])):%H:%M %Z}")
+    return '   '.join(parts)
+
+
+def edit_timezones():
+    from zoneinfo import available_timezones
+    while True:
+        zones=load_timezones()
+        print('\nTIMEZONES · Local time is always shown')
+        for i,item in enumerate(zones):print(f"  {i+1}. {item['label']} — {item['zone']}")
+        print('A Add · E Edit · D Delete · S Search zone names · Q Back')
+        action=input('Action: ').strip().lower()
+        if action in ('q',''):return
+        if action=='s':
+            query=input('City or region: ').strip().lower()
+            print('\n'.join(z for z in sorted(available_timezones()) if query in z.lower()))
+            continue
+        try:
+            if action not in ('a','e','d'):continue
+            index=int(input('Timezone number: '))-1 if action in ('e','d') else None
+            if index is not None and not 0<=index<len(zones):raise ValueError('Choose a listed number')
+            if action=='d':zones.pop(index)
+            else:
+                old=zones[index] if index is not None else {}
+                label=input(f"Label [{old.get('label','')}]: ").strip() or old.get('label','')
+                zone=input(f"Timezone, e.g. Europe/Paris [{old.get('zone','')}]: ").strip() or old.get('zone','')
+                ZoneInfo(zone)
+                if not label:raise ValueError('Label required')
+                item={'label':label,'zone':zone}
+                if index is None:zones.append(item)
+                else:zones[index]=item
+            atomic_json(TIMEZONE_FILE,zones)
+        except (ValueError,KeyError) as exc:print('Not saved:',exc)
+
+
+def new_id():
+    import uuid
+    return uuid.uuid4().hex[:16]
+
+
+def migrate_config(data):
+    if data.get("version") == 2:
+        return data
+    grouped = {}
+    for day, events in data["schedule"].items():
+        for start, end, subject in events:
+            key = (start, end, subject)
+            if key not in grouped:
+                # Stable IDs keep reminder deduplication consistent before first save.
+                import hashlib
+                grouped[key] = {"id": hashlib.sha256(repr(key).encode()).hexdigest()[:16],
+                                "subject": subject, "start": start, "end": end, "days": [],
+                                "from": "0001-01-01", "until": None,
+                                "teacher": data.get("teachers", {}).get(subject, ""),
+                                "url": data.get("links", DEFAULT_LINKS).get(subject, "")}
+            grouped[key]["days"].append(DAYS.index(day))
+    return {"version": 2, "series": list(grouped.values()), "exceptions": {}}
+
+
+DEFAULT_CONFIG = migrate_config({"schedule": SCHEDULE, "teachers": TEACHERS})
+DATA = DEFAULT_CONFIG
+
+
+def valid_date(value):
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def validate_event(event):
+    for key in ("id", "subject", "start", "end"):
+        if not isinstance(event.get(key), str) or not event[key].strip():
+            raise ValueError(f"Missing {key}")
+    for key in ("start", "end"):
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", event[key]):
+            raise ValueError("Use HH:MM times (00:00–23:59)")
+    if event["end"] <= event["start"]:
+        raise ValueError("End time must follow start time")
+    for key in ("subject", "teacher", "url"):
+        value = event.get(key, "")
+        if not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError(f"Invalid {key}")
+    url = event.get("url", "")
+    if url:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("Meeting link must be an https URL")
+
+
+def validate_config(data):
+    if not isinstance(data, dict):
+        raise ValueError("Expected a schedule object")
+    data = migrate_config(data)
+    if not isinstance(data.get("series"), list) or not isinstance(data.get("exceptions"), dict):
+        raise ValueError("Invalid schedule format")
+    for series in data["series"]:
+        validate_event(series)
+        if not isinstance(series.get("days"), list) or not series["days"] or any(
+                type(d) is not int or d not in range(5) for d in series["days"]):
+            raise ValueError("Recurring classes must use Monday–Friday")
+        first = valid_date(series["from"])
+        if series.get("until") and valid_date(series["until"]) < first:
+            raise ValueError("Invalid recurrence date range")
+    for date, exceptions in data["exceptions"].items():
+        valid_date(date)
+        if not isinstance(exceptions, dict):
+            raise ValueError("Invalid date exceptions")
+        for identity, event in exceptions.items():
+            if event is not None:
+                validate_event(event)
+                if event["id"] != identity:
+                    raise ValueError("Exception ID mismatch")
+    return data
+
+
+def load_config():
+    global DATA, TEACHERS, SCHEDULE, TIMETABLE
+    import copy
+    try:
+        with open(CONFIG_FILE) as f:
+            DATA = validate_config(json.load(f))
+    except FileNotFoundError:
+        DATA = copy.deepcopy(DEFAULT_CONFIG)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise ValueError(f"Cannot load schedule: {exc}") from exc
+    TEACHERS = {s["subject"]: s.get("teacher", "") for s in DATA["series"]}
+    SCHEDULE = {}
+    for day in DAYS:
+        events = events_on(date_for_day(day))
+        SCHEDULE[day] = [(e["start"], e["end"], e["subject"]) for e in events]
+        TEACHERS.update({e["subject"]: e.get("teacher", "") for e in events})
+    TIMETABLE = {day: [(e[2], "") for e in events] for day, events in SCHEDULE.items()}
+
+
+def date_for_day(day, reference=None):
+    date = reference or datetime.now().date()
+    return date - timedelta(days=date.weekday()) + timedelta(days=DAYS.index(day))
+
+
+def events_on(date, data=None):
+    import copy
+    data = DATA if data is None else data
+    stamp = date.isoformat()
+    events = {}
+    for series in data["series"]:
+        if (date.weekday() in series["days"] and series["from"] <= stamp
+                and (not series.get("until") or stamp <= series["until"])):
+            events[series["id"]] = copy.deepcopy(series)
+    for identity, event in data["exceptions"].get(stamp, {}).items():
+        if event is None:
+            events.pop(identity, None)
+        else:
+            events[identity] = copy.deepcopy(event)
+    return sorted(events.values(), key=lambda e: (e["start"], e["subject"]))
+
+
+def save_config(data):
+    atomic_json(CONFIG_FILE, validate_config(data))
+
+
+def apply_event_edit(data, date, event, replacement, scope):
+    """Edit a single occurrence, this and future occurrences, or the full series."""
+    import copy
+    data = copy.deepcopy(data)
+    identity, stamp = event["id"], date.isoformat()
+    if scope == "once":
+        data["exceptions"].setdefault(stamp, {})[identity] = replacement
+    elif scope in ("future", "all"):
+        matches = [s for s in data["series"] if s["id"] == identity]
+        if not matches:
+            if scope == "future":
+                raise ValueError("This is a one-off event; choose this occurrence only")
+            data["exceptions"].setdefault(stamp, {})[identity] = replacement
+        else:
+            retained = []
+            for series in data["series"]:
+                if series["id"] != identity:
+                    retained.append(series)
+                elif scope == "future" and series["from"] < stamp:
+                    series["until"] = min(series.get("until") or "9999-12-31",
+                                          (date - timedelta(days=1)).isoformat())
+                    retained.append(series)
+            if replacement is not None:
+                revised = copy.deepcopy(replacement)
+                revised["from"] = stamp if scope == "future" else min(s["from"] for s in matches)
+                revised["until"] = None
+                revised.setdefault("days", event.get("days", [date.weekday()]))
+                retained.append(revised)
+            data["series"] = retained
+            # An explicit series edit also replaces scoped one-off changes.
+            for when, items in data["exceptions"].items():
+                if scope == "all" or when >= stamp:
+                    items.pop(identity, None)
+    else:
+        raise ValueError("Unknown edit scope")
+    return validate_config(data)
+
+
+def ask_scope():
+    value = input("Apply to [1] this occurrence only  [2] this and following  [3] all occurrences: ").strip()
+    if value not in ("1", "2", "3"):
+        raise ValueError("Choose 1, 2, or 3")
+    return {"1": "once", "2": "future", "3": "all"}[value]
+
+
+def edit_schedule(initial_date=None):
+    import copy
+    data = copy.deepcopy(DATA)
+    date = initial_date or datetime.now().date()
+    print("SCHEDULE EDITOR · S saves, Q cancels · blank fields keep their values")
+    print("Series changes replace date-specific changes within the chosen scope.")
+    try:
+        while True:
+            print(f"\n{date:%A %d %B %Y}")
+            events = events_on(date, data)
+            for i, event in enumerate(events, 1):
+                print(f" {i}. {event['start']}–{event['end']}  {event['subject']}")
+            if not events:
+                print(" Nothing scheduled.")
+            action = input("\n[A] Add  [E] Edit  [D] Delete  [R] Restore date  [G] Go to date  [S] Save  [Q] Cancel: ").strip().lower()
+            try:
+                if action == "q":
+                    return
+                if action == "s":
+                    save_config(data)
+                    load_config()
+                    print("Saved. Dashboard, reminders, and widget use these changes.")
+                    return
+                if action == "g":
+                    value = input("Date YYYY-MM-DD (Enter = today): ").strip()
+                    date = valid_date(value) if value else datetime.now().date()
+                    continue
+                if action == "r":
+                    data["exceptions"].pop(date.isoformat(), None)
+                    print("Restored this date to its recurring schedule (save to keep).")
+                    continue
+                if action not in ("a", "e", "d"):
+                    continue
+                if action == "a":
+                    old = {"id": new_id(), "subject": "", "start": "", "end": "", "teacher": "", "url": "", "days": [date.weekday()]}
+                    repeat = input("[1] This date only  [2] Repeat weekly: ").strip()
+                    if repeat not in ("1", "2"):
+                        raise ValueError("Choose 1 or 2")
+                    scope = "once" if repeat == "1" else "new"
+                else:
+                    index = int(input("Class number: ")) - 1
+                    if not 0 <= index < len(events):
+                        raise ValueError("Invalid class number")
+                    old = events[index]
+                    scope = ask_scope()
+                if action == "d":
+                    data = apply_event_edit(data, date, old, None, scope)
+                    continue
+                event = copy.deepcopy(old)
+                for key, label in (("subject", "Subject"), ("start", "Start HH:MM"), ("end", "End HH:MM"),
+                                   ("teacher", "Teacher"), ("url", "Zoom link (- clears)")):
+                    current = event.get(key, "")
+                    value = input(f"{label} [{current}]: ").strip()
+                    if value:
+                        event[key] = "" if value == "-" and key in ("url", "teacher") else value
+                if scope != "once":
+                    current = ",".join(str(d+1) for d in event.get("days", [date.weekday()]))
+                    value = input(f"Repeat on days 1=Mon ... 5=Fri [{current}]: ").strip() or current
+                    event["days"] = sorted(set(int(d.strip())-1 for d in value.split(",")))
+                validate_event(event)
+                if scope == "new":
+                    candidate = copy.deepcopy(data)
+                    event.update({"from": date.isoformat(), "until": None})
+                    candidate["series"].append(event)
+                    data = validate_config(candidate)
+                else:
+                    data = apply_event_edit(data, date, old, event, scope)
+            except (ValueError, KeyError) as exc:
+                print(f"Not changed: {exc}")
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled; nothing saved.")
+
+
+def load_tasks():
+    try:
+        with open(TASK_FILE) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid task file")
+        return data
+    except FileNotFoundError:
+        return {}
+
+
+def task_change(date, action, identity=None, text=None, category="School"):
+    # Serialize edits across dashboard windows without merging away other days.
+    import fcntl
+    os.makedirs(os.path.dirname(TASK_FILE), exist_ok=True)
+    with open(TASK_FILE + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_tasks()
+        items = data.setdefault(date.isoformat(), [])
+        if action == "add":
+            if category not in ("School", "Life") or not text or not text.strip():
+                raise ValueError("A task needs a category and text")
+            items.append({"id": new_id(), "text": text.strip(), "category": category, "done": False})
+        else:
+            task = next((t for t in items if t["id"] == identity), None)
+            if task is None:
+                return
+            if action == "toggle":
+                task["done"] = not task["done"]
+            elif action == "delete":
+                items.remove(task)
+            elif action == "edit" and text and text.strip():
+                task["text"] = text.strip()
+        atomic_json(TASK_FILE, data)
+
+
+def search_all(query):
+    query=query.casefold().strip()
+    if not query:return ['Type a subject, teacher, task or date.']
+    results=[]
+    for item in DATA['series']:
+        if query in ' '.join(str(item.get(k,'')) for k in ('subject','teacher','start','end')).casefold():
+            days=', '.join(DAYS[d][:3].title() for d in item['days'])
+            results.append(f"CLASS   {item['subject']} · {item.get('teacher','')} · {days} {item['start']}–{item['end']}")
+    for date,changes in DATA['exceptions'].items():
+        for item in changes.values():
+            if item and query in (date+' '+item['subject']+' '+item.get('teacher','')).casefold():
+                results.append(f"CHANGED {date} · {item['subject']} · {item.get('teacher','')} · {item['start']}")
+    for date,tasks in sorted(load_tasks().items()):
+        for task in tasks:
+            if query in (date+' '+task['text']+' '+task['category']).casefold():
+                results.append(f"TASK    {date} · {task['category']} · {'✓' if task['done'] else '□'} {task['text']}")
+    return results or ['No matching classes, teachers or tasks.']
+
+
+def export_bundle(path):
+    load_config()
+    atomic_json(str(path),{'format':'nord-classes','version':1,'schedule':DATA,
+                         'timezones':load_timezones(),'tasks':load_tasks(),'completed':load_completed(),'theme':nord_theme.current()})
+
+
+def validate_bundle(data):
+    if not isinstance(data,dict):raise ValueError('Expected a data object')
+    if data.get('format','nord-classes')!='nord-classes' or data.get('version',1)!=1:raise ValueError('Unsupported export format')
+    validate_config(data['schedule'])
+    zones=data.get('timezones',[])
+    if not isinstance(zones,list):raise ValueError('Invalid timezones')
+    for zone in zones:
+        if not isinstance(zone.get('label'),str) or not zone['label'].strip():raise ValueError('Timezone label required')
+        ZoneInfo(zone['zone'])
+    tasks=data.get('tasks',{})
+    if not isinstance(tasks,dict):raise ValueError('Invalid tasks')
+    for date,items in tasks.items():
+        valid_date(date)
+        if not isinstance(items,list):raise ValueError('Invalid task list')
+        for task in items:
+            if not isinstance(task,dict) or not isinstance(task.get('id'),str) or not task['id'] or not isinstance(task.get('text'),str) or not task['text'] or task.get('category') not in ('School','Life') or type(task.get('done')) is not bool:raise ValueError('Invalid task')
+    completed=data.get('completed',{})
+    if not isinstance(completed,dict):raise ValueError('Invalid completion data')
+    for date,keys in completed.items():
+        valid_date(date)
+        if not isinstance(keys,list) or any(not isinstance(k,str) for k in keys):raise ValueError('Invalid completion entries')
+    if data.get('theme','Nord') not in nord_theme.THEMES:raise ValueError('Unknown theme')
+    return data
+
+
+def import_bundle(path,mode='merge'):
+    import copy
+    from pathlib import Path
+    try:incoming=validate_bundle(json.loads(Path(path).read_text()))
+    except (KeyError,TypeError,AttributeError) as exc:raise ValueError('Invalid import file: '+str(exc)) from exc
+    if mode not in ('merge','replace'):raise ValueError('Choose merge or replace')
+    if mode=='replace':schedule=copy.deepcopy(incoming['schedule']);tasks=incoming.get('tasks',{});zones=incoming.get('timezones',[])
+    else:
+        load_config();schedule=copy.deepcopy(DATA)
+        series={s['id']:s for s in schedule['series']};series.update({s['id']:s for s in incoming['schedule']['series']});schedule['series']=list(series.values())
+        for date,changes in incoming['schedule']['exceptions'].items():schedule['exceptions'].setdefault(date,{}).update(changes)
+        tasks=load_tasks()
+        for date,items in incoming.get('tasks',{}).items():
+            combined={t['id']:t for t in tasks.get(date,[])};combined.update({t['id']:t for t in items});tasks[date]=list(combined.values())
+        combined={z['zone']:z for z in load_timezones()};combined.update({z['zone']:z for z in incoming.get('timezones',[])});zones=list(combined.values())
+    validate_config(schedule)
+    completed={} if mode=='replace' else load_completed()
+    for date,keys in incoming.get('completed',{}).items():completed[date]=sorted(set(completed.get(date,[]))|set(keys))
+    writes={CONFIG_FILE:schedule,TASK_FILE:tasks,TIMEZONE_FILE:zones,completion_file():completed}
+    if 'theme' in incoming:writes[str(nord_theme.SETTINGS)]={'theme':incoming['theme']}
+    previous={path:Path(path).read_bytes() if Path(path).exists() else None for path in writes}
+    try:
+        for path,value in writes.items():atomic_json(path,value)
+    except Exception:
+        for path,content in previous.items():
+            if content is None:Path(path).unlink(missing_ok=True)
+            else:atomic_json(path,json.loads(content))
+        raise
+    load_config();load_theme()
+
+
+def data_menu():
+    from pathlib import Path
+    print('CLASSES DATA · schedule, teachers, meeting links, tasks, timezones and theme')
+    action=input('[E] Export  [I] Import  [Enter] Back: ').strip().lower()
+    if action=='e':
+        value=input('Export JSON path [~/Downloads/classes-export.json]: ').strip() or '~/Downloads/classes-export.json'
+        path=Path(value).expanduser()
+        if path.exists() and input('Replace this existing export? [y/N]: ').lower()!='y':return
+        export_bundle(path);print('Exported:',path)
+    elif action=='i':
+        value=input('Import JSON path (Enter cancels): ').strip()
+        if not value:return
+        mode=input('[M] Merge with current data (default) / [R] Replace current data: ').strip().lower()
+        if mode=='r' and input('Replace current Classes data with the file? [y/N]: ').lower()!='y':return
+        import_bundle(Path(value).expanduser(),'replace' if mode=='r' else 'merge');print('Import complete.')
+    else:return
+    input('Press Enter to return…')
+
+
+def open_event(event):
+    url = event.get("url", "").strip()
+    if not url:
+        return "No Zoom link saved for this class. Add one in Edit."
+    validate_event(event)
+    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return f"Opening {event['subject']}…"
+
+
+load_config()
+
+
+def periods_for(day):
+    return [(start, end) for start, end, _ in SCHEDULE[day]]
+
+
+USE_COLOR = sys.stdout.isatty()
+UI_ACTIVE = False
+BASE_STYLE = "\033[48;2;46;52;64m\033[38;2;236;239;244m"
+
+
+# Fixed Nord Frost / Snow Storm colors, independent of desktop themes.
+NORD = {
+    "ACCENT": "88c0d0",  # frost blue
+    "NOW": "8fbcbb",     # pale icy teal
+    "NEXT": "81a1c1",    # rain blue
+    "ROOM": "5e81ac",    # deep blue
+    "DIM": "a3b1c6",     # muted snow blue
+    "TEXT": "eceff4",    # snow white
+}
+
+
+def _fg(hexcode):
+    h = hexcode.lstrip("#")
+    return f"38;2;{int(h[0:2], 16)};{int(h[2:4], 16)};{int(h[4:6], 16)}"
+
+
+def load_theme():
+    global BASE_STYLE
+    palette=nord_theme.palette()
+    bg=palette['background']
+    BASE_STYLE="\033[48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+"m\033["+_fg(palette['text'])+"m"
+    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette['green'],palette['purple'],palette['surface'],palette['dim'],palette['text'])))
+    for name, color in colors.items():
+        globals()[name] = _fg(color)
+
+
+def c(code, text):
+    if not USE_COLOR:
+        return text
+    return f"\033[{code}m{text}\033[0m" + (BASE_STYLE if UI_ACTIVE else "")
+
+
+load_theme()
+BOLD = "1"
+
+
+def hm(s):
+    h, m = s.split(":")
+    return int(h) * 60 + int(m)
+
+
+def fmt_delta(mins):
+    if mins < 60:
+        return f"{mins}m"
+    return f"{mins // 60}h {mins % 60:02d}m"
+
+
+def fmt_delta_sec(seconds):
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return f"{seconds}s"
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins}m {secs:02d}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins:02d}m"
+
+
+def now_seconds(at):
+    if at is not None:
+        return at * 60
+    n = datetime.now()
+    return n.hour * 3600 + n.minute * 60 + n.second
+
+
+def day_name(dt):
+    idx = dt.weekday()
+    return DAYS[idx]
+
+
+def resolve_day(arg, today):
+    if arg is None:
+        return day_name(today) or "monday"
+    a = arg.lower()
+    if a == "today":
+        return day_name(today)
+    if a in ("tomorrow", "tmr", "tom"):
+        nxt = today + timedelta(days=1)
+        return DAYS[nxt.weekday()]
+    for d in DAYS:
+        if d.startswith(a):
+            return d
+    return None
+
+
+def teacher_of(subject):
+    return TEACHERS.get(subject, "")
+
+
+def render_week():
+    now = datetime.now()
+    today = day_name(now)
+    ns = now_seconds(None)
+    parts = []
+    for d in WEEKDAYS:
+        parts.append(render_day(d, ns, d == today))
+    return "\n".join(parts)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def completion_file():
+    return os.path.join(os.path.dirname(TASK_FILE),'completed.json')
+
+
+def load_completed():
+    try:
+        with open(completion_file()) as file:return json.load(file)
+    except (OSError,ValueError):return {}
+
+
+def event_finished(event,date,completed=None):
+    completed=load_completed() if completed is None else completed
+    return event['id']+':'+event['start'] in completed.get(date.isoformat(),[])
+
+
+def toggle_finished(event,date):
+    import fcntl
+    path=completion_file();os.makedirs(os.path.dirname(path),exist_ok=True)
+    with open(path+'.lock','w') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        data=load_completed();stamp=date.isoformat();keys=set(data.get(stamp,[]));key=event['id']+':'+event['start']
+        if key in keys:keys.remove(key);result=False
+        else:keys.add(key);result=True
+        data[stamp]=sorted(keys);atomic_json(path,data)
+    return result
+
+
+def progress_meter(percent,width=10):
+    # Rounded, visibly distinct blocks; percentage remains the precise indicator.
+    filled=max(0,min(width,int(percent*width/100+0.5)))
+    return '['+'■'*filled+'·'*(width-filled)+']'
+
+
+def notify_check(notifier, now=None):
+    now = now or datetime.now()
+    load_config()
+    if not nord_theme.preferences().get("reminders",True):return
+    lead=max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))
+    stamp = now.date().isoformat()
+    seconds = now.hour * 3600 + now.minute * 60 + now.second
+    state = load_state()
+    done = set(state.get("done", [])) if state.get("date") == stamp else set()
+    completed=load_completed()
+    for event in events_on(now.date()):
+        if event_finished(event,now.date(),completed):continue
+        delta = hm(event["start"]) * 60 - seconds
+        key = f"{event['id']}:{event['start']}"
+        if 0 < delta <= lead * 60 and key not in done:
+            # Mark only notifications accepted by the notification server.
+            notifier(event, max(1, (delta + 59) // 60))
+            done.add(key)
+            atomic_json(STATE_FILE, {"date": stamp, "done": sorted(done)})
+
+
+def reminder_daemon(once=False):
+    import dbus
+    import dbus.mainloop.glib
+    from gi.repository import GLib
+    import fcntl
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    lock = open(STATE_FILE + ".lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Reminders are already running.")
+        return
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    loop = GLib.MainLoop()
+    pending = {}
+
+    def send(event, minutes):
+        proxy = bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
+        api = dbus.Interface(proxy, "org.freedesktop.Notifications")
+        actions = ["join", "Join"] if event.get("url") else []
+        import html
+        body = html.escape(" · ".join(x for x in (event["start"],event.get("teacher", "")) if x))
+        notification = api.Notify("StudentDaily", 0, nord_theme.notification_icon("calendar"),
+                                  f"{short_subject(event['subject'])} in {minutes} min", body,
+                                  dbus.Array(actions, signature="s"),
+                                  dbus.Dictionary({"urgency": dbus.Byte(1)}, signature="sv"),
+                                  15000)
+        pending[int(notification)] = event
+
+    def action(notification, action_key):
+        event = pending.pop(int(notification), None)
+        if event and action_key == "join":
+            open_event(event)
+
+    def closed(notification, reason):
+        pending.pop(int(notification), None)
+
+    bus.add_signal_receiver(action, signal_name="ActionInvoked", dbus_interface="org.freedesktop.Notifications")
+    bus.add_signal_receiver(closed, signal_name="NotificationClosed", dbus_interface="org.freedesktop.Notifications")
+
+    def tick():
+        try:
+            notify_check(send)
+        except Exception as exc:
+            print(f"Reminder check failed: {exc}", file=sys.stderr, flush=True)
+        return True
+
+    tick()
+    if once:
+        GLib.timeout_add_seconds(600, lambda: (loop.quit(), False)[1])
+    else:
+        GLib.timeout_add_seconds(15, tick)
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        lock.close()
+
+
+def parse_at(argv):
+    for a in argv:
+        if a.startswith("--at="):
+            return hm(a.split("=", 1)[1])
+    return None
+
+
+def parse_interval(argv):
+    interval = WATCH_INTERVAL
+    for a in argv:
+        if a.startswith("--interval="):
+            try:
+                interval = float(a.split("=", 1)[1])
+            except ValueError:
+                pass
+    return interval
+
+
+def subjects():
+    return sorted({cell[0] for rows in TIMETABLE.values() for cell in rows if cell})
+
+
+def slot_detail(subject, room, tail=""):
+    parts = [subject, teacher_of(subject), f"room {room}" if room else ""]
+    if tail:
+        parts.append(tail)
+    return " · ".join(x for x in parts if x)
+
+
+def render_now(now_sec, day):
+    now=datetime.now()
+    if day==day_name(now):
+        at=now.replace(hour=now_sec//3600,minute=(now_sec%3600)//60,second=now_sec%60)
+        return c(NOW,widget_status(at)["text"])
+    now_min = now_sec // 60
+    rows = TIMETABLE[day]
+    active = []
+    for i, (start, end) in enumerate(periods_for(day)):
+        if rows[i] and hm(start) <= now_min < hm(end):
+            s, r = rows[i]
+            left = hm(end) * 60 - now_sec
+            active.append(c(NOW, "now  ") + slot_detail(s, r, f"ends in {fmt_delta_sec(left)}"))
+    if active:
+        return "\n".join(active)
+    for i, (start, end) in enumerate(periods_for(day)):
+        if rows[i] and hm(start) > now_min:
+            s, r = rows[i]
+            left = hm(start) * 60 - now_sec
+            return c(DIM, "no class right now  ") + c(NEXT, "next ") + slot_detail(
+                s, r, f"in {fmt_delta_sec(left)}"
+            )
+    return c(DIM, "no class right now · done for the day")
+
+
+def render_left(now_sec, day):
+    date=date_for_day(day);completed=load_completed()
+    events=[event for event in events_on(date) if hm(event['end'])*60>now_sec and not event_finished(event,date,completed)]
+    label='class' if len(events)==1 else 'classes'
+    out=['  '+c(ACCENT,f'{len(events)} {label} left')]
+    for event in events:
+        out.append(f"   {event['start']}–{event['end']}   {event['subject']}  "+c(ROOM,event.get('teacher','')))
+    return '\n'.join(out)
+
+
+def render_free(now_sec, day, is_today):
+    now_min = now_sec // 60
+    rows = TIMETABLE[day]
+    blocks = []
+    end_of_previous = None
+    for start, end in periods_for(day):
+        if end_of_previous is not None and hm(start) > hm(end_of_previous):
+            blocks.append((end_of_previous, start, "free"))
+        if end_of_previous is None or hm(end) > hm(end_of_previous):
+            end_of_previous = end
+    out = ["  " + c(ACCENT, "free time · " + day)]
+    for s, e, kind in blocks:
+        tail = ""
+        if is_today:
+            if hm(e) <= now_min:
+                tail = c(DIM, "done")
+            elif hm(s) <= now_min < hm(e):
+                left = hm(e) * 60 - now_sec
+                tail = c(NOW, f"now · {fmt_delta_sec(left)} left")
+            else:
+                left = hm(s) * 60 - now_sec
+                tail = c(NEXT, f"in {fmt_delta_sec(left)}")
+        line = f"   {s}–{e}   {kind:<7}"
+        out.append(line + (" " + tail if tail else ""))
+    return "\n".join(out)
+
+
+def render_subject(query):
+    matches = [s for s in subjects() if s.lower().startswith(query.lower())]
+    if not matches:
+        return c(DIM, f"no subject matching '{query}'")
+    subject = matches[0]
+    out = ["", "  " + c(ACCENT, c(BOLD, subject)) + c(DIM, "  " + teacher_of(subject) if teacher_of(subject) else "")]
+    count = 0
+    for day in DAYS:
+        for i, cell in enumerate(TIMETABLE[day]):
+            if cell and cell[0] == subject:
+                s, e = periods_for(day)[i]
+                room = cell[1] if cell[1] else "–"
+                out.append(f"   {day:<10} {s}–{e}   " + c(ROOM, room))
+                count += 1
+    out.append(c(DIM, f"   {count}x per week"))
+    out.append("")
+    return "\n".join(out)
+
+
+SUBJECT_ORDER = []
+
+
+def ordered_teachers():
+    names = [s for s in SUBJECT_ORDER if s in TEACHERS]
+    names += [s for s in TEACHERS if s not in names and s != "Advisory meeting"]
+    return [(s, TEACHERS[s]) for s in names]
+
+
+def render_teachers():
+    return panel("TEACHERS", [f"{short_subject(s):<18} {t}" for s,t in ordered_teachers()])
+
+
+def build_output(positional, at):
+    arg = positional[0] if positional else None
+
+    now = datetime.now()
+    now_sec = now_seconds(at)
+    today = day_name(now) or "monday"
+
+    if arg == "week":
+        return render_week()
+    if arg == "teachers":
+        return render_teachers()
+    if arg == "now":
+        return "\n" + render_now(now_sec, today) + "\n"
+    if arg == "left":
+        return "\n" + render_left(now_sec, today) + "\n"
+    if arg == "free":
+        return "\n" + render_free(now_sec, today, at is None) + "\n"
+    if arg == "next":
+        now_min = now_sec // 60
+        rows = TIMETABLE[today]
+        for i, (start, end) in enumerate(periods_for(today)):
+            if rows[i] and hm(start) > now_min:
+                s, r = rows[i]
+                left = hm(start) * 60 - now_sec
+                return slot_detail(s, r, f"in {fmt_delta_sec(left)}")
+        return "no more classes today"
+    if arg == "find":
+        if len(positional) < 2:
+            return c(DIM, "usage: class find <subject>") + "\n" + c(DIM, "  " + "  ".join(subjects()))
+        return render_subject(positional[1])
+
+    if arg is None:
+        return render_day(today, now_sec, at is None)
+
+    if arg in ("tomorrow", "tmr", "tom"):
+        return "\n".join(day_panel(now.date()+timedelta(days=1))[0])
+
+    day = resolve_day(arg, now)
+    if day is not None:
+        is_today = day == today and at is None
+        return render_day(day, now_sec, is_today)
+
+    if arg and any(s.lower().startswith(arg.lower()) for s in subjects()):
+        return render_subject(arg)
+
+    return c(DIM, "unknown tag")
+
+
+def pin(interval):
+    term = os.environ.get("TERMINAL", "")
+    options = [
+        ("kitty", ["kitty", "--class", "classes", "--title", "Classes", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
+        ("foot", ["foot", "--app-id=class-watch", "--window-size-chars=90x20", SELF, "menu"]),
+    ]
+    chosen = None
+    for name, cmd in options:
+        if term and os.path.basename(term) == name and shutil.which(term):
+            chosen = cmd
+            break
+    if chosen is None and term and shutil.which(term):
+        chosen = [term, SELF, "menu"]
+    if chosen is None:
+        for name, cmd in options:
+            if shutil.which(name):
+                chosen = cmd
+                break
+    if chosen is None:
+        print("no supported terminal found (kitty or foot)")
+        return
+    subprocess.Popen(
+        chosen,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print("opened the schedule dashboard")
+
+
+def emit_theme():
+    # Colors belong to the app; do not overwrite the terminal's palette.
+    pass
+
+
+def watch_loop(interval):
+    emit_theme()
+    time.sleep(0.4)
+    clear = "\033[2J\033[H"
+    errlog = os.path.expanduser("~/.cache/class-watch.err")
+    try:
+        while True:
+            try:
+                sys.stdout.write(clear + build_output([], None) + "\n")
+                sys.stdout.flush()
+            except OSError:
+                break
+            except Exception:
+                import traceback
+                try:
+                    with open(errlog, "a") as f:
+                        traceback.print_exc(file=f)
+                except OSError:
+                    pass
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print()
+
+
+GLYPH_ROWS = {
+    "0": ["#####", "#   #", "#   #", "#   #", "#   #", "#   #", "#####"],
+    "1": ["  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
+    "2": ["#####", "    #", "    #", "#####", "#    ", "#    ", "#####"],
+    "3": ["#####", "    #", "    #", "#####", "    #", "    #", "#####"],
+    "4": ["#   #", "#   #", "#   #", "#####", "    #", "    #", "    #"],
+    "5": ["#####", "#    ", "#    ", "#####", "    #", "    #", "#####"],
+    "6": ["#####", "#    ", "#    ", "#####", "#   #", "#   #", "#####"],
+    "7": ["#####", "    #", "    #", "    #", "    #", "    #", "    #"],
+    "8": ["#####", "#   #", "#   #", "#####", "#   #", "#   #", "#####"],
+    "9": ["#####", "#   #", "#   #", "#####", "    #", "    #", "#####"],
+    ":": [" ", "#", " ", " ", " ", "#", " "],
+    " ": [" ", " ", " ", " ", " ", " ", " "],
+}
+GLYPHS = {
+    ch: ["".join("██" if px == "#" else "  " for px in row) for row in rows]
+    for ch, rows in GLYPH_ROWS.items()
+}
+GLYPH_H = 7
+
+
+def big_text(text, cols, rows, gap=2):
+    base_w = sum(len(GLYPHS[ch][0]) for ch in text) + gap * (len(text) - 1)
+    sx = max(1, cols // base_w)
+    sy = max(1, min(rows // GLYPH_H, sx))
+    lines = []
+    for r in range(GLYPH_H):
+        parts = []
+        for ch in text:
+            parts.append("".join(px * sx for px in GLYPHS[ch][r]))
+        line = (" " * gap * sx).join(parts)
+        for _ in range(sy):
+            lines.append(line)
+    return lines
+
+
+def center_line(s, cols, visible=None):
+    n = len(s) if visible is None else visible
+    pad = max(0, (cols - n) // 2)
+    return " " * pad + s
+
+
+def shade(color, factor=0.35):
+    parts = color.split(";")
+    if len(parts) == 5 and parts[0] == "38" and parts[1] == "2":
+        r, g, b = (int(round(int(v) * factor)) for v in parts[2:])
+        return f"38;2;{r};{g};{b}"
+    return DIM
+
+
+def with_shadow(body, color):
+    if not body:
+        return []
+    width = max(len(line) for line in body)
+    grid = [list(line.ljust(width)) + [" "] for line in body] + [[" "] * (width + 1)]
+    shadow_color = shade(color)
+    out = []
+    for r, row in enumerate(grid):
+        cells = []
+        for col, ch in enumerate(row):
+            if ch == "█":
+                cells.append("m")
+            elif r > 0 and col > 0 and grid[r - 1][col - 1] == "█":
+                cells.append("s")
+            else:
+                cells.append(" ")
+        line = []
+        i = 0
+        while i < len(cells):
+            j = i
+            while j < len(cells) and cells[j] == cells[i]:
+                j += 1
+            run = j - i
+            if cells[i] == "m":
+                line.append(c(color, "█" * run))
+            elif cells[i] == "s":
+                line.append(c(shadow_color, "█" * run))
+            else:
+                line.append(" " * run)
+            i = j
+        out.append(("".join(line), width + 1))
+    return out
+
+
+def frame(big, below, color):
+    cols, rows = shutil.get_terminal_size((80, 24))
+    body = with_shadow(big_text(big, cols - 5, rows - len(below) - 5), color)
+    total = len(body) + len(below) + 1
+    top = max(0, (rows - total) // 2)
+    out = ["" for _ in range(top)]
+    for line, vis in body:
+        out.append(center_line(line, cols, vis))
+    out.append("")
+    for text, vis in below:
+        out.append(center_line(text, cols, vis))
+    return "\n".join(out)
+
+
+class RawKeys:
+    def __enter__(self):
+        self.fd = sys.stdin.fileno()
+        self.enabled = sys.stdin.isatty()
+        if self.enabled:
+            import termios
+            import tty
+            self.old = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd, termios.TCSANOW)
+        return self
+
+    def __exit__(self, *exc):
+        if self.enabled:
+            import termios
+            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+
+    def read(self, timeout):
+        if not self.enabled:
+            time.sleep(timeout)
+            return None
+        import select
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return None
+        key = os.read(self.fd, 1)
+        if key == b"\x1b":
+            # Read one complete CSI/SS3 sequence, leaving repeated keys queued.
+            while len(key) < 64 and select.select([self.fd], [], [], 0.05)[0]:
+                key += os.read(self.fd, 1)
+                if len(key) == 2 and key[-1:] not in (b"[", b"O"):
+                    break
+                if len(key) >= 3 and 0x40 <= key[-1] <= 0x7e:
+                    break
+        text = key.decode(errors="ignore")
+        return {"\x1bOA": "\x1b[A", "\x1bOB": "\x1b[B",
+                "\x1bOC": "\x1b[C", "\x1bOD": "\x1b[D"}.get(text, text)
+
+
+def clock_loop():
+    emit_theme()
+    time.sleep(0.4)
+    hide = "\033[?25l"
+    show = "\033[?25h"
+    clear = "\033[2J\033[H"
+    sys.stdout.write(hide)
+    try:
+        with RawKeys() as keys:
+            while True:
+                now = datetime.now()
+                date = now.strftime("%A %-d %B · %p").lower()
+                secs = now.strftime("%S")
+
+                below = [
+                    (c(DIM, secs) + "   " + c(ACCENT, date), len(secs) + 3 + len(date)),
+                    ("", 0),
+                    (c(DIM, render_now(now_seconds(None), day_name(now) or "monday").replace("\033[0m", "\033[0m\033[" + DIM + "m")), None),
+                    ("", 0),
+                    (c(NEXT, timezone_text(now)), None),
+                ]
+                fixed = []
+                for text, vis in below:
+                    if vis is None:
+                        vis = len(re.sub(r"\033\[[0-9;]*m", "", text))
+                    fixed.append((text, vis))
+                sys.stdout.write(clear + frame(now.strftime("%I:%M"), fixed, ACCENT) + "\n")
+                sys.stdout.flush()
+                k = keys.read(1 - (time.time() % 1))
+                if k and k.lower() == "q":
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write(show + "\n")
+        sys.stdout.flush()
+
+
+def parse_duration(arg):
+    if arg is None:
+        return 30 * 60
+    if arg.isdigit():
+        return int(arg) * 60
+    total = 0
+    for num, unit in re.findall(r"(\d+)\s*([hms])", arg.lower()):
+        total += int(num) * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total or 30 * 60
+
+
+def class_deadline():
+    reload_schedule()
+    now = datetime.now()
+    seconds=now.hour*3600+now.minute*60+now.second
+    completed=load_completed()
+    events=[e for e in events_on(now.date()) if not event_finished(e,now.date(),completed)]
+    for event in events:
+        if hm(event['start'])*60<=seconds<hm(event['end'])*60:
+            return hm(event['end'])*60-seconds,event['subject']+' ends'
+    for event in events:
+        if hm(event['start'])*60>seconds:return hm(event['start'])*60-seconds,event['subject']+' starts'
+    return None,None
+
+
+def fmt_clock(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def visible_len(s):
+    return len(re.sub(r"\033\[[0-9;]*m", "", s))
+
+
+KEY_UP = "\x1b[A"
+KEY_DOWN = "\x1b[B"
+KEY_RIGHT = "\x1b[C"
+KEY_LEFT = "\x1b[D"
+
+
+def timer_loop(arg):
+    emit_theme()
+    time.sleep(0.4)
+    follow_class = arg == "class"
+    total = parse_duration(None if follow_class else arg)
+    remaining = float(total)
+    running = False
+    finished = False
+    label = None
+    typed = ""
+    hide = "\033[?25l"
+    show = "\033[?25h"
+    clear = "\033[2J\033[H"
+    hint_timer = "space start/pause   r reset   type minutes + enter   up/down 1m   left/right 5m   c class   q quit"
+    hint_class = "c back to timer   q quit"
+
+    def notify(text):
+        subprocess.Popen(
+            ["notify-send", "-a", "StudentDaily", "-i", nord_theme.notification_icon("calendar"), "Timer complete", text],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def set_total(seconds):
+        nonlocal total, remaining, running, finished
+        total = max(10, seconds)
+        remaining = float(total)
+        running = False
+        finished = False
+
+    sys.stdout.write(hide)
+    try:
+        with RawKeys() as keys:
+            last = time.monotonic()
+            while True:
+                now_m = time.monotonic()
+                if follow_class:
+                    left, label = class_deadline()
+                    remaining = float(left) if left is not None else 0.0
+                    total = max(total, remaining)
+                elif running and not finished:
+                    remaining -= now_m - last
+                last = now_m
+                if remaining <= 0 and not finished:
+                    finished = True
+                    running = False
+                    remaining = 0.0
+                    notify(label or fmt_clock(total))
+                    sys.stdout.write("\a")
+
+                cols, rows = shutil.get_terminal_size((80, 24))
+                bar_w = max(10, min(cols - 8, 60))
+                frac = 1 - (remaining / total) if total else 1
+                fill = int(round(bar_w * max(0.0, min(1.0, frac))))
+                bar = c(ACCENT, "━" * fill) + c(DIM, "━" * (bar_w - fill))
+
+                if follow_class:
+                    if label:
+                        status = c(NEXT, label) + c(DIM, "  in " + fmt_delta_sec(int(remaining)))
+                    else:
+                        status = c(DIM, "no more classes today")
+                elif typed:
+                    status = c(NEXT, f"set {typed} min") + c(DIM, "  enter to apply, esc to cancel")
+                elif finished:
+                    status = c(NOW, "done") + c(DIM, "  space or r to go again")
+                elif running:
+                    status = c(NOW, "running") + c(DIM, "  of " + fmt_clock(total))
+                elif remaining == total:
+                    status = c(DIM, "ready  ") + c(ACCENT, fmt_clock(total)) + c(DIM, "  press space")
+                else:
+                    status = c(NEXT, "paused") + c(DIM, "  of " + fmt_clock(total))
+
+                hint = hint_class if follow_class else hint_timer
+                if len(hint) > cols - 2:
+                    hint = "space  r  digits+enter  arrows  c  q"
+                below = [
+                    (bar, bar_w),
+                    (status, visible_len(status)),
+                    ("", 0),
+                    (c(DIM, hint), len(hint)),
+                ]
+                if finished:
+                    color = NOW if int(time.time() * 2) % 2 == 0 else DIM
+                elif follow_class:
+                    color = NEXT
+                elif running:
+                    color = ACCENT
+                else:
+                    color = DIM if remaining == total else NEXT
+                sys.stdout.write(clear + frame(fmt_clock(remaining), below, color) + "\n")
+                sys.stdout.flush()
+
+                k = keys.read(0.2)
+                if not k:
+                    continue
+                if k.lower() == "q":
+                    break
+                if k.lower() == "c":
+                    follow_class = not follow_class
+                    typed = ""
+                    if follow_class:
+                        left, label = class_deadline()
+                        total = float(left) if left else 1.0
+                        finished = False
+                    else:
+                        set_total(parse_duration(arg if arg != "class" else None))
+                    continue
+                if follow_class:
+                    continue
+                if k.isdigit():
+                    typed = (typed + k)[-4:]
+                    continue
+                if k in ("\r", "\n"):
+                    if typed:
+                        set_total(int(typed) * 60)
+                        typed = ""
+                    continue
+                if k in ("\x1b", "\x7f", "\x08"):
+                    typed = typed[:-1] if k != "\x1b" else ""
+                    continue
+                if k == " ":
+                    if finished:
+                        set_total(total)
+                        running = True
+                    else:
+                        running = not running
+                    continue
+                if k.lower() == "r":
+                    set_total(total)
+                    continue
+                delta = {KEY_UP: 60, "+": 60, "=": 60, KEY_DOWN: -60, "-": -60, KEY_RIGHT: 300, KEY_LEFT: -300}.get(k)
+                if delta:
+                    if running or (remaining != total and not finished):
+                        remaining = max(1.0, remaining + delta)
+                        total = max(total, remaining)
+                    else:
+                        set_total(int(total + delta))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write(show + "\n")
+        sys.stdout.flush()
+
+
+def reload_schedule():
+    global TIMETABLE
+    load_config()
+    TIMETABLE = {day: [(subject, "") for _, _, subject in events]
+                 for day, events in SCHEDULE.items()}
+
+
+def short_subject(subject):
+    names = {"math": "Math", "chemistry": "Chemistry",
+             "english": "English", "entrepreneurship": "Entrepreneurship",
+             "world history": "History", "Advisory meeting": "Advisory",
+             "Honors project": "Honors", "Advisory Group Meeting": "Advisory"}
+    return names.get(subject, subject)
+
+
+def widget_status(now=None):
+    now = now or datetime.now()
+    day = day_name(now)
+    seconds = now.hour * 3600 + now.minute * 60 + now.second
+    completed=load_completed()
+    dated_events = [e for e in events_on(now.date()) if not event_finished(e,now.date(),completed)]
+    events = [(e["start"], e["end"], e["subject"]) for e in dated_events]
+    text = "Done for today" if events else "Nothing scheduled today"
+    palette=nord_theme.palette()
+    color = "#"+palette["dim"]
+    class_progress = None
+    progress_bar = ""
+    for start, end, subject in events:
+        if hm(start) * 60 <= seconds < hm(end) * 60:
+            left = max(1, (hm(end) * 60 - seconds + 59) // 60)
+            elapsed = seconds - hm(start) * 60
+            duration = (hm(end) - hm(start)) * 60
+            class_progress = min(99, int(elapsed * 100 / duration))
+            progress_bar = progress_meter(class_progress,10)
+            text = f"{short_subject(subject)[:16]} {progress_meter(class_progress,8)} {class_progress}%"
+            color = "#"+palette["green"]
+            break
+        if hm(start) * 60 > seconds:
+            left = (hm(start) * 60 - seconds + 59) // 60
+            text = f"{short_subject(subject)} in {fmt_delta(left)}"
+            color = "#"+palette["accent"]
+            break
+    soon = [hm(e["start"])*60-seconds for e in dated_events
+            if 0 < hm(e["start"])*60-seconds <= max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))*60]
+    expand_until = int(now.timestamp()+min(soon)) if soon else 0
+    tips = [["CLASSES", now.strftime("%A · %d %B")]]
+    if class_progress is not None:
+        tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
+    for start, end, subject in events:
+        tips.append([f"{start}–{end}", f"{short_subject(subject)} · {teacher_of(subject)}".rstrip(" ·")])
+    if not events:
+        tips.append(["Today", "No classes scheduled"])
+    tips.append(["Click", "Open schedule and menu"])
+    return {"visible": True, "glyph": "calendar", "text": text,
+            "textColor": color, "glyphColor": "#"+palette["accent"], "fontWeight": "medium", "tips": tips, "expandUntil": expand_until, "classProgress": class_progress}
+
+
+def clip_ansi(text, width):
+    parts = re.split(r"(\033\[[0-9;]*m)", text)
+    result, remaining = [], max(0, width)
+    for part in parts:
+        if part.startswith("\033["):
+            result.append(part)
+        elif remaining:
+            result.append(part[:remaining])
+            remaining -= len(part[:remaining])
+    return "".join(result)
+
+
+def panel(title, lines, width=None):
+    width = width or max(24, min(94, shutil.get_terminal_size((90, 24)).columns - 4))
+    inside = width - 4
+    heading = f" {title} "[:width - 4]
+    out = [c(ACCENT, "┌─" + heading + "─" * max(0, width - len(heading) - 3) + "┐")]
+    for line in lines:
+        line = clip_ansi(line, inside)
+        out.append(c(DIM, "│ ") + line + " " * max(0, inside - visible_len(line)) + c(DIM, " │"))
+    out.append(c(ACCENT, "└" + "─" * (width - 2) + "┘"))
+    return "\n".join("  " + line for line in out)
+
+
+MOUSE_ON = "\033[?1000h\033[?1006h"
+MOUSE_OFF = "\033[?1000l\033[?1006l"
+
+
+def parse_mouse(key):
+    match = re.fullmatch(r"\033\[<(\d+);(\d+);(\d+)([Mm])", key)
+    if not match:
+        return None
+    button, x, y, state = match.groups()
+    return int(button), int(x), int(y), state
+
+
+def day_panel(date, selected=-1, now_sec=None):
+    events = events_on(date)
+    is_today = date == datetime.now().date()
+    seconds = now_seconds(None) if now_sec is None else now_sec
+    content, targets = [], {}
+    completed=load_completed()
+    for i, event in enumerate(events):
+        start, end, subject = event["start"], event["end"], event["subject"]
+        finished=event_finished(event,date,completed)
+        active = is_today and hm(start)*60 <= seconds < hm(end)*60 and not finished
+        past = finished or (is_today and hm(end)*60 <= seconds)
+        color = DIM if past else NOW if active else TEXT
+        tag = "DONE" if past else "NOW" if active else ""
+        marker = "▸" if i == selected else " "
+        join = c(ACCENT, "  [Join]") if event.get("url") else ""
+        targets[1+len(content)] = ("event", event)
+        targets[2+len(content)] = ("event", event)
+        content.append(c(color, f"{marker} {start}–{end}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
+        duration = hm(end)-hm(start)
+        detail = " · ".join(x for x in (event.get("teacher", ""), f"{duration} min") if x)
+        if active:
+            left = hm(end)*60-seconds
+            percent=min(99,int((duration*60-left)*100/(duration*60)))
+            detail += " · " + fmt_delta_sec(left) + " left"
+        content.append(c(DIM,"    "+detail))
+        if active:content.append(c(ACCENT,"    "+progress_meter(percent)+f" {percent}%"))
+        content.append("")
+    if content:
+        content.pop()
+    else:
+        content = [c(DIM, "Nothing scheduled today." + (" Enjoy your weekend!" if date.weekday()>4 else ""))]
+    title = date.strftime("%A / %d %b").upper() + (" / TODAY" if is_today else "")
+    return panel(title, content).splitlines(), targets
+
+
+def render_day(day, now_sec, is_today, note=""):
+    lines, _ = day_panel(date_for_day(day), now_sec=now_sec)
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def task_panel(date, selected=-1):
+    tasks = load_tasks().get(date.isoformat(), [])
+    content, targets = [], {}
+    ordered = []
+    for category in ("School", "Life"):
+        content.append(c(ACCENT, category.upper()))
+        matches = [t for t in tasks if t["category"] == category]
+        if not matches:
+            content.append(c(DIM, "  No tasks yet"))
+        for task in matches:
+            index = len(ordered)
+            ordered.append(task)
+            targets[1+len(content)] = ("task", task)
+            box = "[x]" if task["done"] else "[ ]"
+            marker = "▸" if index == selected else " "
+            content.append(c(DIM if task["done"] else TEXT, f"{marker} {box} {task['text']}"))
+        content.append("")
+    targets[1+len(content)] = ("task_controls", None)
+    targets[2+len(content)] = ("task_date", None)
+    content.extend([c(DIM, "A Add task   Enter/Click Toggle   V Edit   X Delete"),
+                    c(DIM, "G Choose date   Tab Select task")])
+    return panel("TO-DO / " + date.strftime("%a %d %b").upper(), content).splitlines(), targets, ordered
+
+
+CONTROL_GROUPS = [
+    ("BROWSE", [("D", "Today", "day"), ("W", "Week", "week"), ("U", "To-do list", "tasks")]),
+    ("MANAGE", [("E", "Edit schedule", ""), ("R", "Teachers", "teachers"), ("F", "Find subject", "find")]),
+    ("FOCUS", [("Z", "Join class", ""), ("T", "Timer", ""), ("O", "Clock", "")]),
+]
+
+
+def dashboard_controls(cols, view):
+    width = max(24, min(94, cols-4))
+    inside = width-4
+    if inside < 60:
+        return panel("CONTROLS", ["D Today  W Week  U To-do", "E Edit   Z Join  T Timer", "H All keys      Q Quit"], width).splitlines()
+    cell_width = inside//3
+    content = ["".join(c(DIM, title.ljust(cell_width)) for title, _ in CONTROL_GROUPS)]
+    for row in range(3):
+        cells = []
+        for _, actions in CONTROL_GROUPS:
+            key, label, target = actions[row]
+            active = target and target == view
+            text = f"{key:>3}  {label}"
+            cells.append(c(NOW if active else ACCENT, f"{key:>3}") + "  " +
+                         c(TEXT if active else DIM, label) + " "*max(0, cell_width-len(text)))
+        content.append("".join(cells))
+    return panel("CONTROLS", content, width).splitlines()
+
+
+def control_key_at(x, y, cols):
+    inside = max(24, min(94, cols-4))-4
+    if inside < 60:
+        if y in (1, 2, 3):
+            rows = [[(4, "d"), (13, "w"), (21, "u")], [(4, "e"), (13, "z"), (21, "t")], [(4, "h"), (20, "q")]]
+            choices = [key for start,key in rows[y-1] if x>=start]
+            return choices[-1] if choices else None
+        return None
+    row = y-2
+    col = (x-5)//(inside//3)
+    if 0<=row<3 and 0<=col<3:
+        return CONTROL_GROUPS[col][1][row][0].lower()
+    return None
+
+
+HELP_TEXT = """CLASSES / QUICK GUIDE
+
+Click controls or use the highlighted keys. Mouse wheel / arrows scroll.
+Click a class with [Join] to open Zoom. Tab selects a class; Enter joins.
+
+D Today     W Week      1–5 Monday–Friday    G Choose date
+U To-do     A Add task  Enter Toggle task   V Edit task   X Delete task
+E Schedule editor      R Teachers          F Search classes/teachers/tasks
+Z Join current/next (or selected) class · M Finish/undo today
+T Timer     C Class countdown               O Clock
+N Now       L Classes left                 B Breaks
+I Timezones   S Import/export   Y Theme
+P Separate window      H Help              Q Quit
+
+EDITING
+This occurrence only: change one date without changing the weekly schedule.
+This and following: change the selected class from that date forward.
+All occurrences: change the recurring class across its scheduled weekdays.
+Series edits replace one-off exceptions within that scope.
+R in the editor restores a date to its recurring schedule.
+S saves all editor changes; Q cancels. Teacher and Zoom link follow edit scope.
+
+TO-DO
+Each date has its own School and Life lists. Completed tasks remain checked.
+Tasks stay on their chosen date; nothing rolls over automatically.
+
+REMINDERS
+Automatic notifications five minutes before class. Click Join Zoom to open it.
+Honors has no Zoom link yet; add one with E if you receive it.
+
+TIMER
+Space start/pause, R reset, arrows adjust, C class mode, Q back.
+"""
+
+
+def default_event_index(events):
+    seconds = now_seconds(None)
+    return next((i for i,e in enumerate(events) if hm(e["end"])*60>seconds), 0)
+
+
+def button_row(items, active=None):
+    line, hits, column = "  ", [], 3
+    for key, label in items:
+        text = f" {key.upper()} {label} "
+        palette=nord_theme.palette();bg=palette["surface"]
+        style = "48;2;"+";".join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette["accent"]) if key==active else ACCENT
+        line += c(style, text) + " "
+        hits.append((column,column+len(text)-1,key))
+        column += len(text)+1
+    return line,hits
+
+
+def wrapped_buttons(items, width, active=None):
+    # Compact buttons, centered independently; click coordinates follow the padding.
+    rows=[];maps={};group=[];used=0
+    def finish(group):
+        texts=[f"{key.upper()} {label}" for key,label in group]
+        length=sum(map(len,texts))+2*(len(texts)-1)
+        padding=2+max(0,(width-length)//2)
+        line=" "*padding;hits=[];column=padding+1
+        palette=nord_theme.palette();bg=palette['surface']
+        selected="48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette['accent'])
+        for (key,label),text in zip(group,texts):
+            line+=c(selected if key==active else ACCENT,text)+"  "
+            hits.append((column,column+len(text)-1,key));column+=len(text)+2
+        maps[len(rows)]=hits;rows.append(line.rstrip())
+    for key,label in items:
+        size=len(key)+len(label)+1
+        if group and used+2+size>width:
+            finish(group);group=[];used=0
+        used+=size+(2 if group else 0);group.append((key,label))
+    if group:finish(group)
+    return rows,maps
+
+
+def dashboard_header(now,date,view,cols,notice):
+    import textwrap
+    width=max(16,min(94,cols-4))
+    left="STUDENTDAILY / "+date.strftime("%a %d %b").upper()
+    clocks=timezone_text(now)
+    if len(left)+len(clocks)+2<=width:
+        rows=["  "+c(TEXT,left)+" "*(width-len(left)-len(clocks))+c(DIM,clocks)]
+    else:
+        rows=["  "+c(TEXT,left)]+["  "+c(DIM,line) for line in textwrap.wrap(clocks,width=width)]
+    rows.append("  "+c(DIM,"─"*width));hits={}
+    active={"day":"d","week":"w","tasks":"u","teachers":"r"}.get(view)
+    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Theme")],active),
+                         ([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[("g","Date")],str(date.weekday()+1) if view=="day" and date.weekday()<5 else None)]:
+        buttons,maps=wrapped_buttons(items,width,chosen)
+        hits.update({len(rows)+i:v for i,v in maps.items()});rows.extend(buttons)
+    rows += ["  "+c(NOW,notice or widget_status(now)["text"]),""]
+    return rows,hits
+
+
+def dashboard_footer(view,cols):
+    width=max(16,min(94,cols-4))
+    actions=[("a","Add task"),("enter","Done"),("v","Edit"),("x","Delete"),("g","Date")] if view=="tasks" else [("z","Join"),("t","Timer"),("c","Countdown"),("o","Clock"),("a","Add task"),("m","Finish")]
+    rows=["  "+c(DIM,"─"*width)];hits={}
+    for items in (actions+[("h","Help"),("q","Quit")],):
+        buttons,maps=wrapped_buttons(items,width)
+        hits.update({len(rows)+i:[(a,b,"\r" if k=="enter" else k) for a,b,k in values] for i,values in maps.items()})
+        rows.extend(buttons)
+    return rows,hits
+
+
+def hit_key(hits,x):
+    return next((key for first,last,key in hits if first<=x<=last),None)
+
+
+def task_summary(date):
+    tasks=load_tasks().get(date.isoformat(),[])
+    lines=[]
+    for category in ("School","Life"):
+        items=[t for t in tasks if t["category"]==category]
+        done=sum(t["done"] for t in items)
+        next_task=next((t["text"] for t in items if not t["done"]),"All clear" if items else "No tasks yet")
+        lines.append(c(ACCENT,f"{category:<9}")+c(DIM,f"{done}/{len(items)} done   ")+c(TEXT,next_task))
+    lines.append(c(DIM,"Click to open your to-do list · A to add a task"))
+    return panel("YOUR DAY",lines).splitlines()
+
+
+def dashboard():
+    global UI_ACTIVE
+    UI_ACTIVE = True
+    view, date, query, offset = "day", datetime.now().date(), "", 0
+    follow_today, selected, notice = True, -1, ""
+    sys.stdout.write("\033[?1049h\033[?25l"+BASE_STYLE+MOUSE_ON)
+    try:
+        while True:
+            try:
+                load_theme()
+                reload_schedule()
+            except ValueError as exc:
+                notice = str(exc)
+            now = datetime.now()
+            if follow_today:
+                date = now.date()
+            events = events_on(date)
+            targets, tasks = {}, []
+            if view == "day":
+                lines, targets = day_panel(date, selected)
+                summary=task_summary(date)
+                lines.append("")
+                targets.update({len(lines)+row:("tasks_open",None) for row in range(len(summary))})
+                lines.extend(summary)
+            elif view == "week":
+                lines = []
+                monday = date-timedelta(days=date.weekday())
+                for delta in range(5):
+                    part, hits = day_panel(monday+timedelta(days=delta))
+                    targets.update({len(lines)+row: hit for row,hit in hits.items()})
+                    lines.extend(part+[""])
+            elif view == "tasks":
+                lines, targets, tasks = task_panel(date, selected)
+            elif view == "teachers":
+                lines = render_teachers().splitlines()
+            elif view == "find":
+                lines = search_all(query)
+            elif view == "help":
+                lines = HELP_TEXT.splitlines()
+            else:
+                lines = build_output([view], None).strip("\n").splitlines()
+            cols, rows = shutil.get_terminal_size((90,28))
+            inset=max(0,(cols-98)//2)
+            canvas_cols=min(cols,98)
+            header,header_hits=dashboard_header(now,date,view,canvas_cols,notice)
+            footer,footer_hits=dashboard_footer(view,canvas_cols)
+            if cols<36 or rows<len(header)+len(footer)+4:
+                sys.stdout.write("\033[H\033[2J"+clip_ansi("Window too small: enlarge it (Q quits).",max(1,cols-1)))
+                sys.stdout.flush()
+                with RawKeys() as keys:key=keys.read(.5)
+                if (key or "").lower()=="q":break
+                continue
+            height = max(1,rows-len(header)-len(footer)-1)
+            offset = min(max(0,offset),max(0,len(lines)-height))
+            shown = lines[offset:offset+height]
+            footer_start = len(header)+height
+            if len(lines)>height:
+                footer[-1] += f"  {offset+1}–{offset+len(shown)}/{len(lines)}"
+            display = header+shown+[""]*(height-len(shown))+footer
+            sys.stdout.write("\033[H"+BASE_STYLE)
+            for line in display[:max(1,rows-1)]:
+                sys.stdout.write(" "*inset+clip_ansi(line,max(1,cols-inset-1))+BASE_STYLE+"\033[K\n")
+            sys.stdout.write("\033[J")
+            sys.stdout.flush()
+            with RawKeys() as keys:
+                key = keys.read(1)
+            if not key:
+                continue
+            mouse = parse_mouse(key)
+            if mouse:
+                button,x,y,state = mouse
+                x-=inset
+                if state == "m":
+                    continue
+                if button in (64,65):
+                    offset += -3 if button==64 else 3
+                    continue
+                if button != 0:
+                    continue
+                if y-1 < len(header):
+                    key=hit_key(header_hits.get(y-1,[]),x)
+                    if not key:continue
+                elif y-1 >= footer_start:
+                    key=hit_key(footer_hits.get(y-1-footer_start,[]),x)
+                    if not key:continue
+                else:
+                    target = targets.get(y-1-len(header)+offset)
+                    if target:
+                        kind,item = target
+                        if kind == "event":
+                            notice = open_event(item)
+                            continue
+                        elif kind == "task":
+                            task_change(date,"toggle",item["id"])
+                            continue
+                        elif kind == "tasks_open":
+                            key="u"
+                        elif kind == "task_controls":
+                            key = "a" if x < 18 else "\r" if x < 40 else "v" if x < 49 else "x"
+                        elif kind == "task_date":
+                            key = "g" if x < 24 else "\t"
+                    else:
+                        continue
+            key = key.lower() if len(key)==1 else key
+            if key=="q":
+                break
+            if key in (KEY_DOWN,"j","\x1b[6~"):
+                offset += height if key=="\x1b[6~" else 1
+                continue
+            if key in (KEY_UP,"k","\x1b[5~"):
+                offset -= height if key=="\x1b[5~" else 1
+                continue
+            if key=="\t":
+                count = len(tasks) if view=="tasks" else len(events)
+                selected = (selected+1)%count if count else -1
+                for row, (_,item) in targets.items():
+                    choices = tasks if view=="tasks" else events
+                    if item is not None and 0<=selected<len(choices) and item["id"]==choices[selected]["id"]:
+                        if row<offset: offset=row
+                        elif row>=offset+height: offset=row-height+1
+                        break
+                continue
+            if key=="m" and events:
+                index=selected if 0<=selected<len(events) else default_event_index(events)
+                event=events[index]
+                if date==now.date() and hm(event['start'])*60<=now_seconds(None):
+                    done=toggle_finished(event,date)
+                    notice="Marked finished. Press M on this class to undo." if done else "Class restored."
+                else:notice="Finish is available once a class has started today."
+                continue
+            if key in ("\r","\n","z"):
+                if view=="tasks" and key!="z":
+                    if tasks:
+                        task_change(date,"toggle",tasks[max(0,selected)%len(tasks)]["id"])
+                elif events:
+                    index = selected if 0<=selected<len(events) else default_event_index(events)
+                    notice = open_event(events[index])
+                else:
+                    notice = "Nothing to join on this date."
+                continue
+            offset,notice = 0,""
+            if key in "12345" and len(key)==1:
+                date = date_for_day(DAYS[int(key)-1],date)
+                view,follow_today,selected = "day",False,-1
+            elif key=="d":
+                view,follow_today,selected = "day",True,-1
+            elif key in ("w","u","r","h","?","n","l","b"):
+                view = {"w":"week","u":"tasks","r":"teachers","h":"help","?":"help","n":"now","l":"left","b":"free"}[key]
+                selected=-1
+            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y"):
+                sys.stdout.write(MOUSE_OFF+"\033[2J\033[H\033[?25h"+BASE_STYLE)
+                try:
+                    if key=="s":
+                        data_menu()
+                    elif key=="y":
+                        nord_theme.picker()
+                        load_theme()
+                    elif key=="i":
+                        edit_timezones()
+                    elif key=="e":
+                        edit_schedule(date)
+                    elif key=="g":
+                        value=input("Date YYYY-MM-DD (Enter = today): ").strip()
+                        date=valid_date(value) if value else now.date()
+                        follow_today=False
+                        selected=-1
+                    elif key=="a":
+                        category=input("Category [S] School / [L] Life (Enter cancels): ").strip().lower()
+                        if category in ("s","l"):
+                            text=input("Task: ").strip()
+                            if text:task_change(date,"add",text=text,category="School" if category=="s" else "Life")
+                        view="tasks"
+                    elif key in ("x","v") and view=="tasks" and tasks:
+                        task=tasks[max(0,selected)%len(tasks)]
+                        if key=="x":
+                            if input(f"Delete '{task['text']}'? [y/N]: ").strip().lower()=="y":
+                                task_change(date,"delete",task["id"])
+                        else:
+                            text=input(f"Task [{task['text']}]: ").strip()
+                            if text:task_change(date,"edit",task["id"],text=text)
+                    elif key=="t":
+                        duration=input("Timer duration (minutes or 1h30m; Enter cancels): ").strip()
+                        if duration:timer_loop(duration)
+                    elif key=="f":
+                        query=input("Search classes, teachers and tasks: ").strip()
+                        view="find" if query else "day"
+                    elif key=="c":timer_loop("class")
+                    elif key=="o":clock_loop()
+                    elif key=="p":pin(1)
+                except (KeyboardInterrupt,EOFError):
+                    pass
+                except (ValueError,OSError) as exc:
+                    notice=str(exc)
+                if key=="y":sys.stdout.write("\033[?1049h")
+                sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
+    except (KeyboardInterrupt,EOFError):
+        pass
+    finally:
+        UI_ACTIVE=False
+        sys.stdout.write(MOUSE_OFF+"\033[0m\033[?25h\033[?1049l")
+        sys.stdout.flush()
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv == ["theme"]:
+        nord_theme.picker()
+        return
+    if argv == ["data"]:
+        data_menu()
+        return
+    if argv == ["timezones"]:
+        edit_timezones()
+        return
+    if argv == ["reload"]:
+        nord_theme.reload_widgets()
+        pin(1)
+        return
+    if any(a in argv for a in ("--help", "-h", "help")):
+        print(HELP_TEXT)
+        return
+    if argv and argv[0] == "status":
+        if "--waybar" in argv:
+            print(json.dumps(nord_theme.waybar_status(widget_status(),"classes")))
+            return
+        print(json.dumps(widget_status()) if "--json" in argv else widget_status()["text"])
+        return
+    if "--reminder-daemon" in argv or "--notify-check" in argv:
+        reminder_daemon(once="--notify-check" in argv)
+        return
+
+    positional = [a for a in argv if not a.startswith("-")]
+    arg = positional[0] if positional else None
+
+    if arg == "tasks":
+        print("\n".join(task_panel(datetime.now().date())[0]))
+        return
+
+    if arg == "edit":
+        edit_schedule()
+        return
+
+    if arg == "pin":
+        pin(parse_interval(argv))
+        return
+
+    if arg == "clock":
+        clock_loop()
+        return
+
+    if arg == "timer":
+        timer_loop(positional[1] if len(positional) > 1 else None)
+        return
+
+    if arg in (None, "menu") and sys.stdin.isatty() and sys.stdout.isatty():
+        dashboard()
+        return
+
+    if arg == "watch":
+        watch_loop(parse_interval(argv))
+        return
+
+    at = parse_at(argv)
+    print(build_output(positional, at))
+
+
+if __name__ == "__main__":
+    main()

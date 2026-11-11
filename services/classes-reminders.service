@@ -1,0 +1,13 @@
+[Unit]
+Description=Classes five-minute reminders with Zoom actions
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/classes --reminder-daemon
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
