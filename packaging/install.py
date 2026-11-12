@@ -139,7 +139,9 @@ def main():
         if not path.exists():path.write_text(json.dumps(preset['completed'])+'\n');path.chmod(0o600)
     if has_classes and preset and 'theme' in preset:
         module=ui_modules['classes']
-        if not module.SETTINGS.exists():module.save(preset['theme'])
+        if not module.SETTINGS.exists():
+            if preset['theme']=='Custom':module.save_custom(preset['custom_theme'])
+            else:module.save(preset['theme'])
     selected_components=(['classes'] if has_classes else [])+(['updates'] if has_packages else [])
     for component in selected_components:
         module=ui_modules[component]

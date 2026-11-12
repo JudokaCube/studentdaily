@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -18,21 +18,100 @@ THEMES={
 }
 SETTINGS=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))/'classes/appearance.json'
 
+CORE_ROLES=('background','text','accent','purple','dim','surface','green','red')
+ROLE_LABELS={
+ 'background':'Window background','text':'Main text','accent':'Links and controls',
+ 'purple':'Secondary accent','dim':'Muted text','surface':'Surfaces',
+ 'green':'Success and timer','red':'Errors',
+ 'border':'Borders','heading':'Menu headings','selection_text':'Selected text',
+ 'selection_background':'Selected background','classes':'Class events',
+ 'personal':'Personal events','active':'Active class','progress':'Class progress',
+ 'task':'Pending tasks','task_done':'Completed tasks','notification':'Notification icon',
+ 'widget_idle':'Idle widget','widget_upcoming':'Upcoming widget','widget_active':'Active widget',
+}
+ROLE_DEFAULTS={'border':'accent','heading':'accent','selection_text':'text',
+ 'selection_background':'surface','classes':'text','personal':'purple','active':'green',
+ 'progress':'green','task':'text','task_done':'dim','notification':'accent',
+ 'widget_idle':'dim','widget_upcoming':'accent','widget_active':'green'}
 _THEME_CACHE={}
-def current():
+
+def theme_names():return list(THEMES)+['Custom']
+
+def appearance():
  try:
   stamp=(str(SETTINGS),SETTINGS.stat().st_mtime_ns)
-  if _THEME_CACHE.get('stamp')!=stamp:_THEME_CACHE.update(stamp=stamp,name=json.loads(SETTINGS.read_text()).get('theme','Nord'))
-  name=_THEME_CACHE['name']
- except (OSError,ValueError,AttributeError):name='Nord'
- return name if isinstance(name,str) and name in THEMES else 'Nord'
+  if _THEME_CACHE.get('stamp')!=stamp:
+   data=json.loads(SETTINGS.read_text())
+   _THEME_CACHE.update(stamp=stamp,data=data if isinstance(data,dict) else {})
+  return dict(_THEME_CACHE.get('data',{}))
+ except (OSError,ValueError):return {}
 
-def palette(name=None):return dict(zip(('background','text','accent','purple','dim','surface','green','red'),THEMES[name or current()]))
+def current():
+ name=appearance().get('theme','Nord')
+ return name if isinstance(name,str) and name in theme_names() else 'Nord'
+
+def validate_custom(data):
+ import re
+ if not isinstance(data,dict) or data.get('format')!='studentdaily-theme' or type(data.get('version')) is not int or data.get('version')!=1:
+  raise ValueError('Choose a StudentDaily theme JSON file (version 1)')
+ name=data.get('name','My theme')
+ if not isinstance(name,str) or not name.strip() or len(name)>60 or any(ord(c)<32 or ord(c)==127 for c in name):
+  raise ValueError('Use a theme name of 1–60 printable characters')
+ colors=data.get('colors')
+ if not isinstance(colors,dict) or not set(CORE_ROLES)<=set(colors) or set(colors)-set(ROLE_LABELS):
+  raise ValueError('Theme has missing or unknown color roles')
+ clean={}
+ for role,color in colors.items():
+  if not isinstance(color,str) or not re.fullmatch(r'#?[0-9a-fA-F]{6}',color):
+   raise ValueError(ROLE_LABELS[role]+': use six hex digits, such as #88c0d0')
+  clean[role]=color.lstrip('#').lower()
+ for role,base in ROLE_DEFAULTS.items():clean.setdefault(role,clean[base])
+ return {'format':'studentdaily-theme','version':1,'name':name.strip(),'colors':clean}
+
+def make_custom(name=None):
+ base=current() if name is None else name
+ colors=palette(base)
+ return validate_custom({'format':'studentdaily-theme','version':1,'name':'My theme','colors':colors})
+
+def custom_theme():
+ try:return validate_custom(appearance().get('custom'))
+ except ValueError:return make_custom('Nord')
+
+def palette(name=None):
+ if isinstance(name,dict):return validate_custom(name)['colors']
+ name=name or current()
+ if name=='Custom':return custom_theme()['colors']
+ return dict(zip(CORE_ROLES,THEMES[name]))
+
+def role_color(role,fallback):
+ colors=palette();return colors.get(role,colors[fallback])
 
 def save(name):
- if name not in THEMES:raise ValueError('Unknown theme')
- _write_json(SETTINGS,{'theme':name})
+ if name not in theme_names():raise ValueError('Unknown theme')
+ data=appearance();data['theme']=name
+ _write_json(SETTINGS,data)
 
+def save_custom(data):
+ custom=validate_custom(data);state=appearance();state.update(theme='Custom',custom=custom)
+ _write_json(SETTINGS,state)
+
+def read_theme(path):
+ path=Path(path).expanduser()
+ if path.stat().st_size>65536:raise ValueError('Theme file is too large (maximum 64 KB)')
+ return validate_custom(json.loads(path.read_text()))
+
+def export_theme(path,data=None,replace=False):
+ path=Path(path).expanduser()
+ if path.exists() and not replace:raise ValueError('File exists; choose another filename')
+ _write_json(path,validate_custom(data if data is not None else custom_theme() if current()=='Custom' else make_custom()))
+
+def contrast_ratio(a,b):
+ def light(color):
+  rgb=[int(color[i:i+2],16)/255 for i in (0,2,4)]
+  rgb=[v/12.92 if v<=.04045 else ((v+.055)/1.055)**2.4 for v in rgb]
+  return sum(v*w for v,w in zip(rgb,(.2126,.7152,.0722)))
+ values=sorted((light(a),light(b)))
+ return (values[1]+.05)/(values[0]+.05)
 
 
 _COLOR_SESSION=0
@@ -60,16 +139,23 @@ def terminal_palette(p):
 
 def curses_colors(curses,win,name=None,personal_role=None):
  p=palette(name);terminal_palette(p)
+ custom='heading' in p
+ if custom:p.update(accent=p['heading'],purple=p['personal'],surface=p['selection_background'])
  if personal_role in p:p['purple']=p[personal_role]
  try:
   # Define useful pairs even on terminals without mutable RGB colors.
   for pair,fg,bg in ((1,curses.COLOR_CYAN,-1),(2,curses.COLOR_WHITE,curses.COLOR_BLUE),
-                     (3,curses.COLOR_WHITE,-1),(4,curses.COLOR_MAGENTA,-1),(5,curses.COLOR_WHITE,-1)):
+                     (3,curses.COLOR_WHITE,-1),(4,curses.COLOR_MAGENTA,-1),(5,curses.COLOR_WHITE,-1),(6,curses.COLOR_CYAN,-1),(7,curses.COLOR_RED,-1)):
    curses.init_pair(pair,fg,bg)
-  if curses.can_change_color() and curses.COLORS>21:
+  if curses.can_change_color() and curses.COLORS>25:
    for i,key in enumerate(('accent','text','surface','background','purple','dim'),16):
     color=p[key];curses.init_color(i,*(round(int(color[n:n+2],16)*1000/255) for n in (0,2,4)))
    curses.init_pair(1,16,-1);curses.init_pair(2,17,18);curses.init_pair(3,17,-1);curses.init_pair(4,20,-1);curses.init_pair(5,21,-1)
+   color=p['red'];curses.init_color(24,*(round(int(color[n:n+2],16)*1000/255) for n in (0,2,4)));curses.init_pair(7,24,-1)
+   if custom:
+    for i,role in ((22,'border'),(23,'selection_text')):
+     color=p[role];curses.init_color(i,*(round(int(color[n:n+2],16)*1000/255) for n in (0,2,4)))
+    curses.init_pair(6,22,-1);curses.init_pair(2,23,18)
   elif curses.COLORS>=256:
    def nearest(value):
     rgb=[int(value[i:i+2],16) for i in (0,2,4)]
@@ -80,6 +166,9 @@ def curses_colors(curses,win,name=None,personal_role=None):
    colors={key:nearest(value) for key,value in p.items()}
    for pair,fg,bg in ((1,'accent','background'),(2,'text','surface'),(3,'text','background'),(4,'purple','background'),(5,'dim','background')):
     curses.init_pair(pair,colors[fg],colors[bg] if pair==2 else -1)
+   curses.init_pair(7,colors['red'],-1)
+   if custom:
+    curses.init_pair(6,colors['border'],-1);curses.init_pair(2,colors['selection_text'],colors['selection_background'])
   win.bkgd(' ',curses.color_pair(3))
  except curses.error:pass
 
@@ -92,7 +181,7 @@ def menu_frame(curses,win,app=None,values=None):
  style=values.get(app+'_border','single')
  edges={'single':('┌','┐','└','┘','─','│'),'double':('╔','╗','╚','╝','═','║'),'heavy':('┏','┓','┗','┛','━','┃'),'none':(' ',' ',' ',' ',' ',' ')}
  tl,tr,bl,br,line,side=frame(app,values)
- color=curses.color_pair({'accent':1,'purple':4,'dim':5}.get(values.get(app+'_border_color'),1))
+ color=curses.color_pair(6 if values.get('_custom_colors') or current()=='Custom' else {'accent':1,'purple':4,'dim':5}.get(values.get(app+'_border_color'),1))
  def write(y,x,text):
   try:win.addnstr(y,x,text,max(0,w-x),color)
   except curses.error:pass
@@ -133,7 +222,7 @@ def select_option(curses,win,title,choices,current):
 
 def picker():
  import curses
- names=list(THEMES)
+ names=theme_names()
  def screen(win):
   selected=names.index(current());offset=0
   curses.curs_set(0);win.keypad(True);curses.start_color();curses.use_default_colors()
@@ -149,10 +238,13 @@ def picker():
    visible=max(1,h-7);offset=max(0,min(offset,selected))
    if selected>=offset+visible:offset=selected-visible+1
    for i,name in enumerate(names[offset:offset+visible]):put(3+i,('› ' if i+offset==selected else '  ')+name,curses.color_pair(2) if i+offset==selected else 0)
-   hint='Enter Apply · N Nord · Esc Back' if w<70 else '↑↓ Preview · Enter/click Apply · N Nord · Esc Back'
+   hint='Enter Apply · C Custom · Esc Back' if w<70 else '↑↓ Preview · Enter Apply · C Custom colors · Esc Back'
    put(h-3,' '*max(0,(w-4-len(hint))//2)+hint,curses.color_pair(1))
    win.refresh();key=win.getch()
    if key in (27,ord('q')):return
+   if key==ord('c'):
+    if custom_editor(win,names[selected]):return
+    continue
    if key in (10,13):save(names[selected]);return
    if key==ord('n'):save('Nord');return
    if key in (curses.KEY_DOWN,ord('j')):selected=min(len(names)-1,selected+1)
@@ -180,7 +272,7 @@ def opacity():
  except (TypeError,ValueError):return .94
 
 def notification_icon(kind='calendar'):
- color=personal_color() if kind=='personal' else palette()['accent'];cache=Path(os.environ.get('XDG_CACHE_HOME',Path.home()/'.cache'))/'studentdaily-icons'
+ color=personal_color() if kind=='personal' else role_color('notification','accent');cache=Path(os.environ.get('XDG_CACHE_HOME',Path.home()/'.cache'))/'studentdaily-icons'
  cache.mkdir(parents=True,exist_ok=True);path=cache/(kind+'-'+color+'.svg')
  if not path.exists():
   # A monochrome vector stays clean at notification icon sizes.
@@ -225,10 +317,10 @@ def settings_fields(app):
  def field(key,label,choices,default,help):return (key,label,choices,default,help)
  yes=[(True,'On'),(False,'Off')]
  fields=[
-  field('theme','Theme',[(name,name) for name in THEMES],'Nord','Applies to this app and its widget after Save.'),
+  field('theme','Theme',[(name,name) for name in theme_names()],'Nord','Applies to this app and its widget after Save.'),
   field('opacity','Window opacity',[(n/100,f'{n}%') for n in range(75,101)],.94,'Takes effect in the next window opened through this app’s launcher.'),
   field(app+'_border','App borders',[(x,x.capitalize()) for x in ('single','double','ascii','none')],'single','Square terminal borders only; does not change desktop window decorations.'),
-  field(app+'_border_color','Border color',[(x,label) for x,label in [('accent','Theme accent'),('purple','Secondary accent'),('dim','Muted')]],'accent','Colors always come from the selected theme.'),
+  field(app+'_border_color','Border color',[(x,label) for x,label in [('accent','Theme accent'),('purple','Secondary accent'),('dim','Muted')]],'accent','Built-in themes use this role. For Custom, edit Borders in Colors.'),
   field(app+'_widget','Bar widget',yes,True,'Hide or show this app’s installed widgets. Hidden widgets still poll so they can reappear.'),
   field(app+'_widget_mode','Widget text',[(x,label) for x,label in [('hover','On hover'),('always','Always'),('icon','Icon only')]],'hover','Noctalia and Waybar text. Caelestia keeps details in its tooltip.'),
   field(app+'_animation','Widget animation',[(x,x.capitalize()) for x in ('gentle','fast','off')],'gentle','Noctalia hover animation. Off reveals text immediately.'),
@@ -243,7 +335,7 @@ def settings_fields(app):
   field('reminder_minutes','Reminder lead time',[(i,f'{i} min') for i in range(1,61)],5,'Remind before an event starts. Existing delivered reminders are not repeated.'),
   field('classes_auto_expand','Expand before event',yes,True,'Temporarily reveal the next event before it starts, except in Icon only mode.'),
   field('classes_progress','Progress indicator',yes,True,'Show active-event progress in the app and widgets.'),
-  field('classes_personal_color','Personal-event color',[(x,label) for x,label in [('purple','Secondary accent'),('accent','Primary accent'),('green','Success accent')]],'purple','Uses the corresponding color from every selected theme, including notifications.'),
+  field('classes_personal_color','Personal-event color',[(x,label) for x,label in [('purple','Secondary accent'),('accent','Primary accent'),('green','Success accent')]],'purple','Built-in themes use this role, including notifications. For Custom, edit Personal events in Colors.'),
   field('classes_weekends','Weekend columns',[(x,label) for x,label in [('auto','When scheduled'),('hide','Hide'),('show','Always show')]],'auto','Controls the week view. Hidden weekend events still appear in Today and date navigation.'),
   field('classes_start_view','Opening view',[(x,label) for x,label in [('day','Today'),('week','Week'),('tasks','To-do')]],'day','Used the next time StudentDaily opens.'),
   field('classes_compact','Compact event rows',yes,False,'Hide secondary teacher/duration lines; keep titles, times and progress.'),
@@ -271,8 +363,8 @@ def frame(app,values=None):
          'ascii':('+','+','+','+','-','|'),'none':(' ',' ',' ',' ',' ',' ')}[values.get(app+'_border','single')]
 
 
-def border_color(app):return palette()[options(app)[app+'_border_color']]
-def personal_color():return palette()[options('classes')['classes_personal_color']]
+def border_color(app):return palette().get('border',palette()[options(app)[app+'_border_color']])
+def personal_color():return palette().get('personal',palette()[options('classes')['classes_personal_color']])
 
 
 def widget_options(app):
@@ -359,7 +451,7 @@ def settings(app):
    put(1,name.upper()+' / SETTINGS'+(' · unsaved' if draft!=original else ''),curses.color_pair(1)|curses.A_BOLD)
    tl,tr,bl,br,horiz,vert=frame(app)
    put(2,'Appearance · Widgets · Background services',curses.color_pair(5))
-   put(3,'↑↓ Move · ←→ Adjust · Enter Options · Ctrl+S Save',curses.color_pair(1))
+   put(3,'↑↓ Move · ←→ Adjust · Enter Options · C Colors',curses.color_pair(1))
    count=max(1,h-13);offset=min(offset,cursor)
    if cursor>=offset+count:offset=cursor-count+1
    for i,(key,label,choices,_,_) in enumerate(fields[offset:offset+count],offset):
@@ -370,8 +462,8 @@ def settings(app):
     put(4+i-offset,line.ljust(max(0,w-4)),curses.color_pair(2) if i==cursor else 0)
    import textwrap
    for line,text in enumerate(textwrap.wrap(fields[cursor][1]+': '+fields[cursor][4],max(1,w-4))[:3]):put(h-7+line,text,curses.color_pair(1))
-   put(h-4,notice or 'Theme colors preview here. Save applies; Esc discards.')
-   labels=[('save','[ Save ]'),('reset','[ Defaults ]'),('cancel','[ Back / discard ]')]
+   put(h-4,notice or 'Theme colors preview here. Save applies; Esc discards.',curses.color_pair(7) if notice.startswith('Not saved:') else 0)
+   labels=[('save','[ Save ]'),('colors','[ Colors ]'),('reset','[ Defaults ]'),('cancel','[ Back ]')]
    width=sum(len(label) for _,label in labels)+4;left=max(2,(w-width)//2);hits=[]
    for action,label in labels:
     try:win.addnstr(h-2,left,label,max(0,w-left-1),curses.color_pair(1)|curses.A_BOLD)
@@ -389,6 +481,9 @@ def settings(app):
      else:continue
     else:continue
    if key in (27,3,ord('q')) or action=='cancel':return
+   if key==ord('c') or action=='colors':
+    if custom_editor(win,draft['theme']):draft['theme']=current();original['theme']=current();notice='Custom theme saved.'
+    continue
    if key==19 or action=='save':apply();continue
    if key==ord('r') or action=='reset':
     draft={key:default for key,_,_,default,_ in fields};notice='Defaults selected. Nothing changes until Save.';continue
@@ -403,3 +498,103 @@ def settings(app):
     draft[field]=values[(values.index(draft[field])+(-step if key==curses.KEY_LEFT else step))%len(values)];notice=''
  try:run_screen(screen)
  except KeyboardInterrupt:pass
+
+
+def color_prompt(curses,win,title,value=''):
+ """Small editable field shared by color, name and file inputs."""
+ text=value;replace=True
+ while True:
+  h,w=win.getmaxyx();win.erase();menu_frame(curses,win)
+  for y,line in ((1,title),(3,text or ' '),(h-3,'Type or paste · Enter Accept · Esc Cancel · Ctrl+U Clear')):
+   try:win.addnstr(y,2,line,max(1,w-4),curses.color_pair(1) if y!=3 else curses.color_pair(2))
+   except curses.error:pass
+  win.refresh();key=win.get_wch()
+  if key in ('\x1b','\x03'):return None
+  if key in ('\n','\r'):return text.strip()
+  if key in (curses.KEY_BACKSPACE,'\x7f','\b'):text='' if replace else text[:-1];replace=False
+  elif key=='\x15':text='';replace=False
+  elif isinstance(key,str) and key.isprintable():text=key if replace else text+key;replace=False
+
+
+def custom_editor(win,base=None):
+ """Live custom colors with atomic saves; import and undo only modify the draft."""
+ import curses,copy
+ draft=custom_theme() if (base or current())=='Custom' else make_custom(base)
+ baseline=copy.deepcopy(draft);undo=[];redo=[];cursor=0;offset=0;notice=''
+ roles=list(ROLE_LABELS)
+ def change(next_value):
+  nonlocal draft
+  next_value=validate_custom(next_value)
+  if next_value!=draft:undo.append(copy.deepcopy(draft));redo.clear();draft=next_value
+ def put(y,text,style=0):
+  h,w=win.getmaxyx()
+  if 0<=y<h-1:
+   try:win.addnstr(y,2,text,max(0,w-4),style)
+   except curses.error:pass
+ while True:
+  curses_colors(curses,win,draft);win.erase();h,w=win.getmaxyx();menu_frame(curses,win,values={**options(APP),'_custom_colors':True})
+  if h<16 or w<48:
+   put(1,'Resize to 48 columns × 16 rows. Esc cancels.');win.refresh()
+   if win.getch() in (27,3):return False
+   continue
+  put(1,'CUSTOM COLORS / '+draft['name']+(' *' if draft!=baseline else ''),curses.color_pair(1)|curses.A_BOLD)
+  put(2,'Enter Edit hex · N Name · U Undo · Y Redo · R Reset color',curses.color_pair(5))
+  count=max(1,h-10);offset=min(offset,cursor)
+  if cursor>=offset+count:offset=cursor-count+1
+  for i,role in enumerate(roles[offset:offset+count],offset):
+   color=draft['colors'][role];line=('› ' if i==cursor else '  ')+ROLE_LABELS[role].ljust(23)+' #'+color
+   put(4+i-offset,line,curses.color_pair(2) if i==cursor else 0)
+   try:
+    pair=40+i
+    if curses.can_change_color() and curses.COLORS>64 and curses.COLOR_PAIRS>64:
+     curses.init_color(32+i,*(round(int(color[n:n+2],16)*1000/255) for n in (0,2,4)))
+     curses.init_pair(pair,32+i,-1)
+     win.addstr(4+i-offset,w-6,'██',curses.color_pair(pair))
+   except curses.error:pass
+  p=draft['colors'];ratio=contrast_ratio(p['text'],p['background']);selected=contrast_ratio(p['selection_text'],p['selection_background'])
+  put(h-5,f'Contrast: text {ratio:.1f}:1 · selected {selected:.1f}:1'+(' · low contrast' if min(ratio,selected)<4.5 else ''),curses.color_pair(5))
+  put(h-4,notice or 'Preview only. Save applies to this app and its widget.',curses.color_pair(7) if notice.startswith('Error:') else 0)
+  labels=[('save','Save'),('import','Import'),('export','Export'),('base','Base'),('back','Back')]
+  width=sum(len(label)+4 for _,label in labels);left=max(2,(w-width)//2);hits=[]
+  for action,label in labels:
+   text='[ '+label+' ]'
+   try:win.addnstr(h-2,left,text,max(0,w-left-1),curses.color_pair(1))
+   except curses.error:pass
+   hits.append((left,left+len(text),action));left+=len(text)
+  win.refresh();key=win.getch();action=None
+  if key==curses.KEY_MOUSE:
+   try:_,x,y,_,state=curses.getmouse()
+   except curses.error:continue
+   if state & curses.BUTTON4_PRESSED:key=curses.KEY_UP
+   elif state & getattr(curses,'BUTTON5_PRESSED',0):key=curses.KEY_DOWN
+   elif state & (curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED):
+    if y==h-2:action=next((a for lo,hi,a in hits if lo<=x<hi),None)
+    elif 4<=y<4+min(count,len(roles)-offset):cursor=offset+y-4;key=10
+    else:continue
+  if key in (27,3) or action=='back':return False
+  try:
+   if key==19 or action=='save':save_custom(draft);return True
+   if key in (curses.KEY_DOWN,9):cursor=(cursor+1)%len(roles)
+   elif key in (curses.KEY_UP,curses.KEY_BTAB):cursor=(cursor-1)%len(roles)
+   elif key in (curses.KEY_NPAGE,curses.KEY_PPAGE):cursor=max(0,min(len(roles)-1,cursor+(count if key==curses.KEY_NPAGE else -count)))
+   elif key in (10,13):
+    role=roles[cursor];value=color_prompt(curses,win,ROLE_LABELS[role]+' / #RRGGBB','#'+draft['colors'][role])
+    if value is not None:
+     next_value=copy.deepcopy(draft);next_value['colors'][role]=value;change(next_value);notice=''
+   elif key==ord('n'):
+    value=color_prompt(curses,win,'THEME NAME',draft['name'])
+    if value is not None:change(dict(draft,name=value))
+   elif key in (ord('u'),26) and undo:redo.append(copy.deepcopy(draft));draft=undo.pop()
+   elif key in (ord('y'),25) and redo:undo.append(copy.deepcopy(draft));draft=redo.pop()
+   elif key==ord('r'):
+    next_value=copy.deepcopy(draft);next_value['colors'][roles[cursor]]=baseline['colors'][roles[cursor]];change(next_value)
+   elif key==ord('b') or action=='base':
+    name=select_option(curses,win,'Copy preset',[(name,name) for name in THEMES]+[('cancel','Cancel')],'cancel')
+    if name!='cancel':change(make_custom(name));notice='Preset copied into draft; edit any color.'
+   elif key==ord('i') or action=='import':
+    path=color_prompt(curses,win,'IMPORT THEME / JSON PATH')
+    if path:change(read_theme(path));notice='Imported into preview. Save to apply.'
+   elif key==ord('e') or action=='export':
+    path=color_prompt(curses,win,'EXPORT THEME / JSON PATH',str(Path.home()/'Downloads/studentdaily-theme.json'))
+    if path:export_theme(path,draft);notice='Theme exported. No schedule or personal data included.'
+  except (ValueError,OSError,TypeError) as exc:notice='Error: '+str(exc)

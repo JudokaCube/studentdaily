@@ -812,7 +812,8 @@ def search_all(query):
 def export_bundle(path):
     load_config()
     atomic_json(str(path),{'format':'nord-classes','version':1,'schedule':DATA,
-                         'timezones':load_timezones(),'tasks':load_tasks(),'completed':load_completed(),'theme':nord_theme.current()})
+                         'timezones':load_timezones(),'tasks':load_tasks(),'completed':load_completed(),'theme':nord_theme.current(),
+                         **({'custom_theme':nord_theme.custom_theme()} if nord_theme.current()=='Custom' else {})})
 
 
 def validate_bundle(data):
@@ -836,7 +837,8 @@ def validate_bundle(data):
     for date,keys in completed.items():
         valid_date(date)
         if not isinstance(keys,list) or any(not isinstance(k,str) for k in keys):raise ValueError('Invalid completion entries')
-    if data.get('theme','Nord') not in nord_theme.THEMES:raise ValueError('Unknown theme')
+    if data.get('theme','Nord') not in nord_theme.theme_names():raise ValueError('Unknown theme')
+    if data.get('theme')=='Custom':nord_theme.validate_custom(data.get('custom_theme'))
     return data
 
 
@@ -860,7 +862,10 @@ def import_bundle(path,mode='merge'):
     completed={} if mode=='replace' else load_completed()
     for date,keys in incoming.get('completed',{}).items():completed[date]=sorted(set(completed.get(date,[]))|set(keys))
     writes={CONFIG_FILE:schedule,TASK_FILE:tasks,TIMEZONE_FILE:zones,completion_file():completed}
-    if 'theme' in incoming:writes[str(nord_theme.SETTINGS)]={'theme':incoming['theme']}
+    if 'theme' in incoming:
+        appearance=nord_theme.appearance();appearance['theme']=incoming['theme']
+        if incoming['theme']=='Custom':appearance['custom']=nord_theme.validate_custom(incoming['custom_theme'])
+        writes[str(nord_theme.SETTINGS)]=appearance
     previous={path:Path(path).read_bytes() if Path(path).exists() else None for path in writes}
     try:
         for path,value in writes.items():atomic_json(path,value)
@@ -958,7 +963,7 @@ def load_theme():
     palette=nord_theme.palette()
     bg=palette['background']
     BASE_STYLE="\033[48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+"m\033["+_fg(palette['text'])+"m"
-    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette['green'],nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text'])))
+    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette.get('active',palette['green']),nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text'])))
     for name, color in colors.items():
         globals()[name] = _fg(color)
 
@@ -1793,7 +1798,7 @@ def widget_status(now=None):
     events = [(e["start"], e["end"], e["subject"]) for e in dated_events]
     text = "Done for today" if events else "Nothing scheduled today"
     palette=nord_theme.palette()
-    color = "#"+palette["dim"]
+    color = "#"+palette.get("widget_idle",palette["dim"])
     class_progress = None
     progress_bar = ""
     for event in dated_events:
@@ -1806,12 +1811,12 @@ def widget_status(now=None):
             class_progress = min(99, int(elapsed * 100 / duration))
             progress_bar = progress_meter(class_progress,10)
             text = f"{short_subject(subject)[:16]} {progress_meter(class_progress,8)} {class_progress}%"
-            color = "#"+(nord_theme.personal_color() if personal else palette["green"])
+            color = "#"+(nord_theme.personal_color() if personal else palette.get("widget_active",palette["green"]))
             break
         if hm(start) * 60 > seconds:
             left = (hm(start) * 60 - seconds + 59) // 60
             text = f"{short_subject(subject)} in {fmt_delta(left)}"
-            color = "#"+(nord_theme.personal_color() if personal else palette["accent"])
+            color = "#"+(nord_theme.personal_color() if personal else palette.get("widget_upcoming",palette["accent"]))
             break
     soon = [hm(e["start"])*60-seconds for e in dated_events
             if 0 < hm(e["start"])*60-seconds <= nord_theme.options("classes")["reminder_minutes"]*60]
@@ -1883,7 +1888,7 @@ def day_panel(date, selected=-1, now_sec=None):
         finished=event_finished(event,date,completed)
         active = is_today and hm(start)*60 <= seconds < hm(end)*60 and not finished
         past = finished or (is_today and hm(end)*60 <= seconds)
-        color = DIM if past else NEXT if event.get("kind")=="personal" else NOW if active else TEXT
+        color = DIM if past else NEXT if event.get("kind")=="personal" else NOW if active else _fg(nord_theme.role_color("classes","text"))
         tag = "DONE" if past else "NOW" if active else ""
         marker = "▸" if i == selected else " "
         join = c(ACCENT, "  [Join]") if event.get("url") and event.get("kind")!="personal" else ""
@@ -1897,7 +1902,7 @@ def day_panel(date, selected=-1, now_sec=None):
             percent=min(99,int((duration*60-left)*100/(duration*60)))
             detail += " · " + fmt_delta_sec(left) + " left"
         if not prefs["classes_compact"]:content.append(c(DIM,"    "+detail))
-        if active and prefs["classes_progress"]:content.append(c(color,"    "+progress_meter(percent)+f" {percent}%"))
+        if active and prefs["classes_progress"]:content.append(c(_fg(nord_theme.role_color("progress","green")) if event.get("kind")!="personal" else color,"    "+progress_meter(percent)+f" {percent}%"))
         content.append("")
     if content:
         content.pop()
@@ -1927,7 +1932,7 @@ def task_panel(date, selected=-1):
             targets[1+len(content)] = ("task", task)
             box = "[x]" if task["done"] else "[ ]"
             marker = "▸" if index == selected else " "
-            content.append(c(DIM if task["done"] else TEXT, f"{marker} {box} {task['text']}"))
+            content.append(c(_fg(nord_theme.role_color("task_done" if task["done"] else "task","dim" if task["done"] else "text")), f"{marker} {box} {task['text']}"))
         content.append("")
     targets[1+len(content)] = ("task_controls", None)
     targets[2+len(content)] = ("task_date", None)
@@ -2022,8 +2027,8 @@ def button_row(items, active=None):
     line, hits, column = "  ", [], 3
     for key, label in items:
         text = f" {key.upper()} {label} "
-        palette=nord_theme.palette();bg=palette["surface"]
-        style = "48;2;"+";".join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette["accent"]) if key==active else ACCENT
+        palette=nord_theme.palette();bg=palette.get("selection_background",palette["surface"])
+        style = "48;2;"+";".join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette.get("selection_text",palette["accent"])) if key==active else ACCENT
         line += c(style, text) + " "
         hits.append((column,column+len(text)-1,key))
         column += len(text)+1
@@ -2038,8 +2043,8 @@ def wrapped_buttons(items, width, active=None):
         length=sum(map(len,texts))+2*(len(texts)-1)
         padding=2+max(0,(width-length)//2)
         line=" "*padding;hits=[];column=padding+1
-        palette=nord_theme.palette();bg=palette['surface']
-        selected="48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette['accent'])
+        palette=nord_theme.palette();bg=palette.get('selection_background',palette['surface'])
+        selected="48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette.get('selection_text',palette['accent']))
         for (key,label),text in zip(group,texts):
             line+=c(selected if key==active else ACCENT,text)+"  "
             hits.append((column,column+len(text)-1,key));column+=len(text)+2

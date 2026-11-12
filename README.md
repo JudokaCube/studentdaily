@@ -36,6 +36,8 @@ Open **Settings** or press **Y**. Use arrows for quick adjustments; Enter or a c
 - StudentDaily: 12/24-hour clocks, clock seconds, week numbers, teacher details, default event length, reminders, progress, weekends and task summary.
 - Appearance: theme, opacity, borders, widget visibility and text. Noctalia also supports animation controls.
 
+**Custom colors:** open **Settings → Colors** (C). Edit hex colors for text, selections, events, tasks, borders, progress, notification icons and widget states. Preview changes, copy a preset with **Base**, undo/redo with **U/Y**, or reset a color with **R**. **Import/Export** shares a theme-only JSON file; **Save** applies it and **Back** discards the draft. Desktop notification backgrounds remain controlled by your notification service.
+
 Reopen the app after changing opacity. Widget changes appear after a short delay.
 
 ## Desktop bars
