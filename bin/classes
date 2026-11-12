@@ -391,6 +391,20 @@ def apply_event_edit(data, date, event, replacement, scope):
     return validate_config(data)
 
 
+def apply_subject_link(data, subject, url):
+    """Update only meeting links for matching classes, including date overrides."""
+    import copy
+    result = copy.deepcopy(data)
+    key = subject.strip().casefold()
+    events = list(result['series'])
+    events += [event for overrides in result['exceptions'].values()
+               for event in overrides.values() if event is not None]
+    for event in events:
+        if event.get('kind', 'class') == 'class' and event['subject'].strip().casefold() == key:
+            event['url'] = url.strip()
+    return validate_config(result)
+
+
 def ask_scope():
     value = input("Apply to [1] this occurrence only  [2] this and following  [3] all occurrences: ").strip()
     if value not in ("1", "2", "3"):
@@ -605,6 +619,13 @@ def edit_schedule(initial_date=None):
                     try:
                         target=valid_date(stamp) if new else date
                         candidate=commit_event(DATA,target,old,event,scope,new,field=='delete')
+                        if field=='save' and event.get('kind','class')=='class' and event.get('url','')!=(old or {}).get('url',''):
+                            link_scope=choose_menu('SAVE MEETING LINK', [
+                                ('subject','All '+event['subject']+' events','Updates this class on every date, including separately added events. Other details stay unchanged.'),
+                                ('scope','Use event scope',summary),
+                                ('cancel','Back to editing')],win=win)
+                            if link_scope in (None,'cancel'):continue
+                            if link_scope=='subject':candidate=apply_subject_link(candidate,event['subject'],event.get('url',''))
                         # Refuse to overwrite another open editor's changes.
                         if (Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b'')!=baseline:raise ValueError('Schedule changed elsewhere. Cancel and reopen this editor.')
                         save_config(candidate);load_config()
