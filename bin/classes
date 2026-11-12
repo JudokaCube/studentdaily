@@ -730,6 +730,66 @@ def task_change(date, action, identity=None, text=None, category="School"):
         atomic_json(TASK_FILE, data)
 
 
+def plan_tasks(target, action, source=None, identity=None, category=None):
+    """Move tasks atomically without duplicating them or losing completed work."""
+    import fcntl
+    os.makedirs(os.path.dirname(TASK_FILE), exist_ok=True)
+    with open(TASK_FILE + '.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load_tasks()
+        stamp = target.isoformat()
+        changed = 0
+        if action == 'carry':
+            incoming = []
+            for day, items in data.items():
+                if day < stamp:
+                    incoming.extend(t for t in items if not t['done'])
+                    data[day] = [t for t in items if t['done']]
+            changed = len(incoming)
+            used = {t['id'] for t in data.get(stamp, [])}
+            for task in incoming:
+                if task['id'] in used:task['id'] = new_id()
+                used.add(task['id'])
+            data.setdefault(stamp, []).extend(incoming)
+        elif action in ('move', 'category'):
+            if source is None:raise ValueError('Choose a task first')
+            items = data.get(source.isoformat(), [])
+            task = next((t for t in items if t['id'] == identity), None)
+            if task is None:raise ValueError('Task changed elsewhere; select it again')
+            if action == 'move' and target != source:
+                if any(t['id']==identity for t in data.get(stamp,[])):
+                    raise ValueError('A task with this ID already exists on that date')
+                items.remove(task);data.setdefault(stamp, []).append(task);changed = 1
+            elif action == 'category':
+                if category not in ('School','Life'):raise ValueError('Choose School or Life')
+                task['category'] = category;changed = 1
+        else:raise ValueError('Unknown task action')
+        atomic_json(TASK_FILE, data)
+        return changed
+
+
+def task_planning_menu(date, task=None):
+    choices=[('carry','Bring unfinished tasks here','Move unfinished tasks from earlier dates to '+date.isoformat()+'.')]
+    if task:
+        choices += [('move','Reschedule selected task',task['text']),('category','Change category',task['category'])]
+    action=choose_menu('PLAN TASKS',choices)
+    if action=='carry':
+        count=sum(not t['done'] for day,items in load_tasks().items() if day<date.isoformat() for t in items)
+        if not count:return 'No unfinished tasks on earlier dates.'
+        if choose_menu('MOVE '+str(count)+' UNFINISHED TASKS?', [('move','Move to '+date.isoformat(),'Completed tasks stay on their original dates.'),('cancel','Cancel')])=='move':
+            return str(plan_tasks(date,'carry'))+' tasks moved to '+date.isoformat()+'.'
+    elif action=='move' and task:
+        selected=choose_menu('RESCHEDULE TASK', [('tomorrow','Next day',(date+timedelta(days=1)).isoformat()),('week','One week later',(date+timedelta(days=7)).isoformat()),('date','Choose date')])
+        if selected:
+            value=text_dialog('DATE YYYY-MM-DD',date.isoformat()) if selected=='date' else (date+timedelta(days=1 if selected=='tomorrow' else 7)).isoformat()
+            if value:
+                target=valid_date(value);plan_tasks(target,'move',date,task['id']);return 'Task moved to '+target.isoformat()+'.'
+    elif action=='category' and task:
+        category=choose_menu('TASK CATEGORY',[('School','School'),('Life','Life')])
+        if category:plan_tasks(date,'category',date,task['id'],category);return 'Category updated.'
+    return ''
+
+
 def search_all(query):
     query=query.casefold().strip()
     if not query:return ['Type an event, teacher, task or date.']
@@ -1872,7 +1932,7 @@ def task_panel(date, selected=-1):
     targets[1+len(content)] = ("task_controls", None)
     targets[2+len(content)] = ("task_date", None)
     content.extend([c(DIM, "A Add task   Enter/Click Toggle   V Edit   X Delete"),
-                    c(DIM, "G Choose date   Tab Select task")])
+                    c(DIM, "G Choose date   P Plan tasks   Tab Select task")])
     return panel("TO-DO / " + date.strftime("%a %d %b").upper(), content).splitlines(), targets, ordered
 
 
@@ -1941,6 +2001,7 @@ S saves all editor changes; Q cancels. Teacher and Zoom link follow edit scope.
 
 TO-DO
 Each date has its own School and Life lists. Completed tasks remain checked.
+P in To-do opens task planning: reschedule, change category or bring earlier unfinished tasks here.
 Tasks stay on their chosen date; nothing rolls over automatically.
 
 REMINDERS
@@ -2015,7 +2076,7 @@ def dashboard_header(now,date,view,cols,notice):
 
 def dashboard_footer(view,cols):
     width=max(16,min(94,cols-4))
-    actions=[("a","Add task"),("enter","Done"),("v","Edit"),("x","Delete"),("g","Date")] if view=="tasks" else [("z","Join"),("t","Timer"),("c","Countdown"),("o","Clock"),("a","Add task"),("m","Finish")]
+    actions=[("a","Add task"),("enter","Done"),("v","Edit"),("x","Delete"),("g","Date"),("p","Plan tasks")] if view=="tasks" else [("z","Join"),("t","Timer"),("c","Countdown"),("o","Clock"),("a","Add task"),("m","Finish")]
     rows=["  "+c(DIM,"─"*width)];hits={}
     for items in (actions+[("h","Help"),("q","Quit")],):
         buttons,maps=wrapped_buttons(items,width)
@@ -2141,7 +2202,7 @@ def dashboard():
                         elif kind == "task_controls":
                             key = "a" if x < 18 else "\r" if x < 40 else "v" if x < 49 else "x"
                         elif kind == "task_date":
-                            key = "g" if x < 24 else "\t"
+                            key = "g" if x < 18 else "p" if x < 35 else "\t"
                     else:
                         continue
             key = key.lower() if len(key)==1 else key
@@ -2229,7 +2290,9 @@ def dashboard():
                         view="find" if query else "day"
                     elif key=="c":timer_loop("class")
                     elif key=="o":clock_loop()
-                    elif key=="p":pin(1)
+                    elif key=="p":
+                        if view=="tasks":notice=task_planning_menu(date,tasks[max(0,selected)%len(tasks)] if tasks else None)
+                        else:pin(1)
                 except (KeyboardInterrupt,EOFError):
                     pass
                 except (ValueError,OSError) as exc:
