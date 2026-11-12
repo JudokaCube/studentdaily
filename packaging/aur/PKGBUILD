@@ -1,0 +1,52 @@
+# Maintainer: jdkcube
+pkgname=studentdaily
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Class and personal-event organizer with reminders and desktop widgets'
+arch=('any')
+url='https://github.com/JudokaCube/studentdaily'
+license=('MIT')
+depends=('python>=3.11' 'kitty' 'systemd' 'xdg-utils' 'tzdata' 'python-dbus' 'python-gobject' 'libnotify')
+optdepends=('waybar: optional desktop bar' 'quickshell: optional Caelestia widget' 'qt6-declarative: optional Caelestia QML integration')
+source=('studentdaily-0.1.0.tar.gz::https://github.com/JudokaCube/studentdaily/releases/download/v0.1.0/studentdaily-0.1.0.tar.gz')
+sha256sums=('d923206ec564b8fdf5f227b8c0dd841862c03d6db0bac6fa99a24f253cbf3d15')
+
+check() {
+    python - "$srcdir/$pkgname-$pkgver" <<'PY'
+import ast,sys,subprocess,tempfile,os,json
+from pathlib import Path
+root=Path(sys.argv[1])
+for path in root.rglob('*'):
+    if path.is_file() and (path.suffix=='.py' or path.parent.name=='bin'):
+        ast.parse(path.read_text())
+with tempfile.TemporaryDirectory() as temp:
+    env=dict(os.environ,HOME=temp,XDG_CONFIG_HOME=temp+'/config',XDG_DATA_HOME=temp+'/data',XDG_CACHE_HOME=temp+'/cache',XDG_STATE_HOME=temp+'/state',PYTHONDONTWRITEBYTECODE='1')
+    command=[sys.executable,str(root/'bin/classes')]
+    version=subprocess.check_output(command+['--version'],env=env,text=True)
+    assert '0.1.0' in version,version
+    args=['status','--waybar'] if 'studentdaily'=='studentdaily' else ['--waybar']
+    status=json.loads(subprocess.check_output(command+args,env=env,text=True))
+    assert isinstance(status,dict) and 'text' in status
+    subprocess.run([sys.executable,str(root/'setup.py'),'--help'],env=env,check=True,stdout=subprocess.DEVNULL)
+PY
+}
+
+package() {
+    local tree="$srcdir/$pkgname-$pkgver"
+    install -Dm755 "$tree/bin/classes" "$pkgdir/usr/lib/$pkgname/classes"
+    install -Dm644 "$tree/bin/studentdaily_ui.py" "$pkgdir/usr/lib/$pkgname/studentdaily_ui.py"
+    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/$pkgname" "$pkgdir/usr/lib/systemd/user"
+    ln -s "/usr/lib/$pkgname/classes" "$pkgdir/usr/bin/$pkgname"
+    install -Dm755 "$tree/setup.py" "$pkgdir/usr/share/$pkgname/setup.py"
+    install -Dm644 "$tree/configure.py" "$pkgdir/usr/share/$pkgname/configure.py"
+    ln -s "/usr/share/$pkgname/setup.py" "$pkgdir/usr/bin/$pkgname-setup"
+    cp -r "$tree/plugins" "$tree/integrations" "$pkgdir/usr/share/$pkgname/"
+    local unit
+    for unit in "$tree"/services/*; do
+        sed 's|%h/.local/bin/classes|/usr/bin/studentdaily|g' "$unit" > "$pkgdir/usr/lib/systemd/user/${unit##*/}"
+        chmod 644 "$pkgdir/usr/lib/systemd/user/${unit##*/}"
+    done
+    install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$tree/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "$tree/$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+}

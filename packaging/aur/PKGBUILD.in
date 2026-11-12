@@ -1,0 +1,52 @@
+# Maintainer: jdkcube
+pkgname=@APP@
+pkgver=@VERSION@
+pkgrel=@PKGREL@
+pkgdesc='@DESCRIPTION@'
+arch=('any')
+url='@PROJECT_URL@'
+license=('MIT')
+depends=(@DEPENDS@)
+optdepends=(@OPTDEPENDS@)
+source=('@SOURCE@')
+sha256sums=('@SHA256@')
+
+check() {
+    python - "$srcdir/$pkgname-$pkgver" <<'PY'
+import ast,sys,subprocess,tempfile,os,json
+from pathlib import Path
+root=Path(sys.argv[1])
+for path in root.rglob('*'):
+    if path.is_file() and (path.suffix=='.py' or path.parent.name=='bin'):
+        ast.parse(path.read_text())
+with tempfile.TemporaryDirectory() as temp:
+    env=dict(os.environ,HOME=temp,XDG_CONFIG_HOME=temp+'/config',XDG_DATA_HOME=temp+'/data',XDG_CACHE_HOME=temp+'/cache',XDG_STATE_HOME=temp+'/state',PYTHONDONTWRITEBYTECODE='1')
+    command=[sys.executable,str(root/'bin/@EXECUTABLE@')]
+    version=subprocess.check_output(command+['--version'],env=env,text=True)
+    assert '@VERSION@' in version,version
+    args=['status','--waybar'] if '@APP@'=='studentdaily' else ['--waybar']
+    status=json.loads(subprocess.check_output(command+args,env=env,text=True))
+    assert isinstance(status,dict) and 'text' in status
+    subprocess.run([sys.executable,str(root/'setup.py'),'--help'],env=env,check=True,stdout=subprocess.DEVNULL)
+PY
+}
+
+package() {
+    local tree="$srcdir/$pkgname-$pkgver"
+    install -Dm755 "$tree/bin/@EXECUTABLE@" "$pkgdir/usr/lib/$pkgname/@EXECUTABLE@"
+    install -Dm644 "$tree/bin/@MODULE@.py" "$pkgdir/usr/lib/$pkgname/@MODULE@.py"
+    install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/$pkgname" "$pkgdir/usr/lib/systemd/user"
+    ln -s "/usr/lib/$pkgname/@EXECUTABLE@" "$pkgdir/usr/bin/$pkgname"
+    install -Dm755 "$tree/setup.py" "$pkgdir/usr/share/$pkgname/setup.py"
+    install -Dm644 "$tree/configure.py" "$pkgdir/usr/share/$pkgname/configure.py"
+    ln -s "/usr/share/$pkgname/setup.py" "$pkgdir/usr/bin/$pkgname-setup"
+    cp -r "$tree/plugins" "$tree/integrations" "$pkgdir/usr/share/$pkgname/"
+    local unit
+    for unit in "$tree"/services/*; do
+        sed 's|%h/.local/bin/@EXECUTABLE@|/usr/bin/@APP@|g' "$unit" > "$pkgdir/usr/lib/systemd/user/${unit##*/}"
+        chmod 644 "$pkgdir/usr/lib/systemd/user/${unit##*/}"
+    done
+    install -Dm644 "$tree/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$tree/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "$tree/$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+}

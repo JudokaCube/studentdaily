@@ -1,6 +1,6 @@
-id = "nord-desktop/classes"
+id = "jdkcube/classes"
 name = "StudentDaily"
-version = "1.0.0"
+version = "0.1.0"
 plugin_api = 32
 author = "jdkcube"
 description = "Compact class schedule that expands on hover"

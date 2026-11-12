@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Optional desktop setup; package installation never changes user settings."""
+import argparse,os,shutil,subprocess,sys
+from pathlib import Path
+APP='@APP@'
+COMPONENT='@COMPONENT@'
+ROOT=Path(__file__).resolve().parent
+
+def migrate_local():
+    """Migrate only this app's recognized files; leave user data and aliases alone."""
+    local=Path.home()/'.local/bin'
+    original=local/'@EXECUTABLE@'
+    canonical=local/APP
+    target=Path('/usr/bin')/APP
+    if not target.exists():raise SystemExit('Install the system package before migrating local launchers.')
+    for path in (original,canonical):
+        if path.exists() or path.is_symlink():
+            if path.is_symlink() and path.resolve() in (original.resolve(),target.resolve()):continue
+            if not path.is_symlink() and 'import @MODULE@ as nord_theme' in path.read_text():continue
+            raise SystemExit('Unrecognized launcher; left unchanged: '+str(path))
+    config=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))
+    units=[]
+    for unit in (Path('/usr/lib/systemd/user')).glob('classes-reminders.service' if COMPONENT=='classes' else 'system-update-check.*'):
+        override=config/'systemd/user'/unit.name
+        if override.exists():
+            content=override.read_text()
+            expected='StudentDaily' if COMPONENT=='classes' else 'KeepItNew'
+            if expected not in content:raise SystemExit('Custom service override left unchanged: '+str(override))
+            units.append(override)
+    local.mkdir(parents=True,exist_ok=True)
+    for path in (original,canonical):
+        path.unlink(missing_ok=True);path.symlink_to(target)
+    for unit in units:unit.unlink()
+    subprocess.run(['systemctl','--user','daemon-reload'],check=True)
+    subprocess.run(['systemctl','--user','try-restart','@UNIT@'],check=True)
+    print('Local launchers migrated. Saved schedules, tasks and settings were preserved.')
+
+def main():
+    parser=argparse.ArgumentParser(description='Configure '+APP+' desktop integration for the current user.')
+    parser.add_argument('--bar',choices=['noctalia','waybar','caelestia','none'],default='none')
+    parser.add_argument('--position',choices=['auto','start','center','end'],default='auto')
+    parser.add_argument('--waybar-config',type=Path)
+    parser.add_argument('--caelestia-root',type=Path)
+    parser.add_argument('--enable-background',action='store_true')
+    parser.add_argument('--migrate-local',action='store_true',help='Replace recognized local launchers and service overrides with this system package')
+    args=parser.parse_args()
+    if os.geteuid()==0:parser.error('Run as your desktop user, not root.')
+    if args.migrate_local:migrate_local()
+    if args.bar=='caelestia' and not args.caelestia_root:parser.error('--caelestia-root is required')
+    data=Path(os.environ.get('XDG_DATA_HOME',Path.home()/'.local/share'))
+    if args.bar=='noctalia':
+        if not shutil.which('noctalia'):parser.error('Noctalia is not installed')
+        destination=data/'noctalia-plugins'/COMPONENT
+        destination.mkdir(parents=True,exist_ok=True)
+        for source in (ROOT/'plugins'/COMPONENT).iterdir():
+            if source.is_file():
+                target=destination/source.name
+                target.unlink(missing_ok=True);target.symlink_to(source)
+    environment=dict(os.environ,SUITE_COMPONENTS=COMPONENT,SUITE_BAR=args.bar,SUITE_POSITION=args.position,SUITE_ALIASES='0')
+    if args.waybar_config:environment['SUITE_WAYBAR_CONFIG']=str(args.waybar_config.expanduser())
+    if args.caelestia_root:environment['SUITE_CAELESTIA_ROOT']=str(args.caelestia_root.expanduser())
+    subprocess.run([sys.executable,str(ROOT/'configure.py')],env=environment,check=True)
+    sys.path.insert(0,'/usr/lib/'+APP)
+    import importlib
+    ui=importlib.import_module('@MODULE@')
+    settings=ui.preferences().copy();settings['bar']=args.bar
+    if args.enable_background:settings['reminders' if COMPONENT=='classes' else 'checks_enabled']=True
+    ui._write_json(ui.SETTINGS.parent/'preferences.json',settings)
+    if args.enable_background:
+        subprocess.run(['systemctl','--user','daemon-reload'],check=True)
+        subprocess.run(['systemctl','--user','enable','--now','@UNIT@'],check=True)
+    ui.reload_widgets()
+    print('Configured '+APP+'. Restart Waybar or Caelestia if newly added. No shell aliases were changed.')
+if __name__=='__main__':main()

@@ -35,7 +35,9 @@ def main():
     has_classes=(ROOT/'bin/classes').exists()
     has_packages=(ROOT/'bin/system-update').exists()
     sys.path.insert(0,str(ROOT/'bin'))
-    import nord_theme
+    import importlib
+    ui_modules={name:importlib.import_module(module) for name,module,present in [('classes','studentdaily_ui',has_classes),('updates','keepitnew_ui',has_packages)] if present}
+    nord_theme=next(iter(ui_modules.values()))
     interactive=sys.stdin.isatty() and not args.yes
     if interactive:
         print(app_name+' · customize installation')
@@ -76,7 +78,7 @@ def main():
     if args.theme is not None and args.theme not in nord_theme.THEMES:parser.error('Unknown theme')
     if args.opacity is not None and not .75<=args.opacity<=1:parser.error('Opacity must be between .75 and 1')
     if not 1<=args.reminder_minutes<=60 or not 5<=args.check_minutes<=1440:parser.error('Reminder minutes: 1–60; check minutes: 5–1440')
-    needed=['python3','kitty','systemctl']+(['noctalia'] if args.bar=='noctalia' else [])+(['xdg-open'] if has_classes else [])+(['pacman','flatpak'] if has_packages else [])
+    needed=['python3','kitty','systemctl']+(['noctalia'] if args.bar=='noctalia' else [])+(['xdg-open'] if has_classes else [])+(['pacman'] if has_packages else [])
     missing=[app for app in needed if not shutil.which(app)]
     if missing:parser.error('Install required tools first: '+', '.join(missing))
     if sys.version_info<(3,11):parser.error('Python 3.11+ required')
@@ -102,11 +104,18 @@ def main():
         from zoneinfo import ZoneInfo
         for zone in preset.get('timezones',[]):ZoneInfo(zone['zone'])
     def copy(source,target):
-        target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
-    included=['nord_theme.py']+(['classes'] if has_classes else [])+(['system-update'] if has_packages else [])
+        target.parent.mkdir(parents=True,exist_ok=True)
+        if target.is_symlink():target.unlink()
+        shutil.copy2(source,target)
+    included=(['classes','studentdaily_ui.py'] if has_classes else [])+(['system-update','keepitnew_ui.py'] if has_packages else [])
     for file in (ROOT/'bin').iterdir():
         if file.is_file() and file.name in included:
             copy(file,HOME/'.local/bin'/file.name);(HOME/'.local/bin'/file.name).chmod(0o755)
+    for name,target,enabled in [('studentdaily','classes',has_classes),('keepitnew','system-update',has_packages)]:
+        if enabled:
+            link=HOME/'.local/bin'/name
+            if link.is_symlink() or link.exists():link.unlink()
+            link.symlink_to(target)
     for folder,target in [('plugins',DATA/'noctalia-plugins'),('services',CONFIG/'systemd/user')]:
         for file in (ROOT/folder).rglob('*'):
             if not file.is_file():continue
@@ -128,19 +137,24 @@ def main():
     if has_classes and preset and preset.get('completed'):
         path=DATA/'classes/completed.json';path.parent.mkdir(parents=True,exist_ok=True)
         if not path.exists():path.write_text(json.dumps(preset['completed'])+'\n');path.chmod(0o600)
-    if preset and 'theme' in preset:
-        path=CONFIG/'nord-desktop/appearance.json';path.parent.mkdir(parents=True,exist_ok=True)
-        if not path.exists():path.write_text(json.dumps({'theme':preset['theme']})+'\n');path.chmod(0o600)
-    preferences=dict(nord_theme.preferences());preferences.update(bar=args.bar)
-    if has_classes:preferences.update(reminders=not args.no_reminders,reminder_minutes=args.reminder_minutes)
-    if has_packages:preferences.update(check_minutes=args.check_minutes,auto_confirm=not args.confirm_updates)
-    if args.opacity is not None:preferences['opacity']=args.opacity
-    pref=CONFIG/'nord-desktop/preferences.json';pref.parent.mkdir(parents=True,exist_ok=True);pref.write_text(json.dumps(preferences,indent=2)+'\n')
-    if args.theme:nord_theme.save(args.theme)
+    if has_classes and preset and 'theme' in preset:
+        module=ui_modules['classes']
+        if not module.SETTINGS.exists():module.save(preset['theme'])
+    selected_components=(['classes'] if has_classes else [])+(['updates'] if has_packages else [])
+    for component in selected_components:
+        module=ui_modules[component]
+        preferences=dict(module.preferences());preferences.update(bar=args.bar)
+        if component=='classes':preferences.update(reminders=not args.no_reminders,reminder_minutes=args.reminder_minutes)
+        else:preferences.update(check_minutes=args.check_minutes,checks_enabled=not args.no_checks,auto_confirm=not args.confirm_updates)
+        if args.opacity is not None:preferences['opacity']=args.opacity
+        module._write_json(module.SETTINGS.parent/'preferences.json',preferences)
+        if args.theme:module.save(args.theme)
     if has_packages:
         timer=CONFIG/'systemd/user/system-update-check.timer'
         import re
         timer.write_text(re.sub(r'OnUnitActiveSec=.*',f'OnUnitActiveSec={args.check_minutes}min',timer.read_text()))
+        dropin=timer.parent/'system-update-check.timer.d/keepitnew.conf'
+        if dropin.exists():dropin.write_text('[Timer]\nOnUnitActiveSec=\nOnUnitActiveSec='+str(args.check_minutes)+'min\n')
     environment=dict(os.environ,SUITE_BAR=args.bar,SUITE_POSITION=args.position,SUITE_ALIASES='0' if args.no_aliases else '1',SUITE_COMPONENTS=','.join((['classes'] if has_classes else [])+(['updates'] if has_packages else [])))
     if args.caelestia_root:environment['SUITE_CAELESTIA_ROOT']=str(args.caelestia_root.expanduser())
     if args.waybar_config:environment['SUITE_WAYBAR_CONFIG']=str(args.waybar_config.expanduser())
@@ -155,7 +169,7 @@ def main():
             if os.environ.get(key):subprocess.run(['systemctl','--user','import-environment',key],check=True)
         for unit in units:subprocess.run(['systemctl','--user','restart',unit],check=True)
         if has_packages and not args.no_checks:subprocess.run(['systemctl','--user','start','--no-block','system-update-check.service'])
-        nord_theme.reload_widgets()
+        for component in selected_components:ui_modules[component].reload_widgets()
     print('Installed. Open a new terminal for aliases. No keybindings were changed.')
     if has_classes and setup=='customize':
         subprocess.run([str(HOME/'.local/bin/classes'),'timezones'])

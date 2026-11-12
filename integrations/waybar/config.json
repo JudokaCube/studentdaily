@@ -1,12 +1,12 @@
 {
   "custom/studentdaily": {
-    "exec": "\"$HOME/.local/bin/classes\" status --waybar",
+    "exec": "if command -v studentdaily >/dev/null 2>&1; then studentdaily status --waybar; else \"$HOME/.local/bin/classes\" status --waybar; fi",
     "return-type": "json",
     "interval": 10,
     "signal": 8,
     "format": "{text}",
     "tooltip": true,
-    "on-click": "\"$HOME/.local/bin/classes\" pin",
-    "on-click-right": "\"$HOME/.local/bin/classes\" reload"
+    "on-click": "if command -v studentdaily >/dev/null 2>&1; then studentdaily pin; else \"$HOME/.local/bin/classes\" pin; fi",
+    "on-click-right": "if command -v studentdaily >/dev/null 2>&1; then studentdaily reload; else \"$HOME/.local/bin/classes\" reload; fi"
   }
 }

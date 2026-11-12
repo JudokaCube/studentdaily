@@ -1,3 +1,5 @@
+local displayMode = "hover"
+local animation = .22
 -- Calendar icon at rest; gently reveal the live schedule on hover.
 local label = "StudentDaily"
 local progress = 0
@@ -19,10 +21,13 @@ local function poll()
     if busy then return end
     busy = true
     lastPoll = os.time()
-    noctalia.runAsync('"$HOME/.local/bin/classes" status --json', function(result)
+    noctalia.runAsync('if command -v studentdaily >/dev/null 2>&1; then studentdaily status --json; else "$HOME/.local/bin/classes" status --json; fi', function(result)
         busy = false
         local data = result.exitCode == 0 and noctalia.json.decode(result.stdout) or nil
         if data and type(data) == "table" then
+            displayMode = data.displayMode or "hover"
+            animation = data.animation or .22
+            barWidget.setVisible(data.visible ~= false)
             label = data.text or "StudentDaily"
             expandUntil = data.expandUntil or 0
             barWidget.setColor(data.textColor or "#88c0d0")
@@ -37,13 +42,13 @@ local function poll()
 end
 
 function update()
-    target = (hovering or os.time() < expandUntil) and 1 or 0
+    target = (displayMode == "always" or (displayMode ~= "icon" and (hovering or os.time() < expandUntil))) and 1 or 0
     if os.time() - lastPoll >= 15 then poll() end
     if math.abs(progress - target) < 0.01 then
         progress = target
         noctalia.setUpdateInterval(1000)
     else
-        progress = progress + (target - progress) * 0.22
+        progress = progress + (target - progress) * animation
         noctalia.setUpdateInterval(16)
     end
     render()
@@ -56,7 +61,7 @@ function onHover(isHovering)
 end
 
 function onClick()
-    noctalia.runAsync('"$HOME/.local/bin/classes" pin')
+    noctalia.runAsync('if command -v studentdaily >/dev/null 2>&1; then studentdaily pin; else "$HOME/.local/bin/classes" pin; fi')
 end
 
 function onIpc(event)
@@ -71,5 +76,5 @@ noctalia.setUpdateInterval(1000)
 poll()
 
 function onRightClick()
-    noctalia.runAsync('"$HOME/.local/bin/classes" reload')
+    noctalia.runAsync('if command -v studentdaily >/dev/null 2>&1; then studentdaily reload; else "$HOME/.local/bin/classes" reload; fi')
 end

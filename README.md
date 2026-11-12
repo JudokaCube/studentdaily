@@ -2,49 +2,58 @@
 
 Organize classes, personal events and daily tasks, with reminders and a desktop widget.
 
-## Install
+## Features
+
+- Classes and personal events, with interactive forms and edits for one occurrence, future occurrences or the whole series.
+- Daily School/Life tasks, teachers, meeting links, extra timezone clocks and search.
+- Event reminders, progress indicators, early finish/undo, and JSON import/export.
+- Nine themes, optional transparency, square border styles and configurable widgets.
+
+## Installation
 
 Requires Linux, Python 3.11+, Kitty and systemd. Reminders use python-dbus and python-gobject.
+
+Download the installer from [GitHub Releases](https://github.com/JudokaCube/studentdaily/releases/latest), extract it, and run `bash install.sh`. The installer starts with no personal data.
+
+From the source folder:
 
 ```sh
 python3 build-release.py
 bash release/install.sh
 ```
 
-For a downloaded installer, run `bash install.sh`. Setup offers theme, opacity, bar, position, aliases and reminders. Existing data is preserved; no keybindings are added. `--help` lists flags; `--yes` uses defaults/flags without questions.
+For an extracted installer archive, run `bash install.sh` instead.
 
-## Bars
+This installer includes only StudentDaily and its widgets. Choose a bar, theme and background-service options during setup. Existing app data is preserved. Open a new terminal to use newly enabled aliases.
 
-- Noctalia 5.3+: native plugins, enabled automatically.
-- Waybar: native custom modules; existing JSON/JSONC values are preserved, formatting/comments are rewritten. Restart Waybar after installation.
-- Caelestia: requires an editable shell checkout via `--caelestia-root`; setup adds the supplied QML widget to its bar. Restart that shell afterward. System-owned files are not changed.
-- None: apps and optional background services only.
+## Usage
 
-Right-click opens fresh app code. Widget styles follow the shared theme. Waybar uses tooltips for hover details; Caelestia uses a tooltip and progress strip. Shell-native notification alignment remains controlled by the shell.
+Run `studentdaily`. Local installs also provide `classes`, with optional `class` and `today` aliases. Use **Schedule** to add or edit events, **Zones** for clocks, and **Data** for import/export. Click controls or use the keyboard; **H** opens help.
 
-## StudentDaily
+In event forms, type directly into fields, use arrows or Tab to move, and toggle repeat days with Space. **Apply to** opens the one-date, future-date and entire-series choices; a summary shows the affected dates. Weekly presets select weekdays or daily personal events. **Ctrl+S** saves; **Esc** cancels. Personal events have no teacher or meeting-link fields. Clocks use city search, and tasks and import/export use selectable menus instead of numbered prompts.
 
-Run `classes` or `python3 bin/classes`. Click controls; arrows/wheel scroll; Tab selects.
+## Settings
 
-- Schedule: click or use arrows to select events. One form edits type, title, time, repeat days and once/future/all scope; ctrl+s saves, Esc cancels.
-- Personal events: use the selected theme’s secondary accent across the app, notifications and widgets, without teachers or meeting links; reminders, progress and finish work for both types.
-- Zones: add, edit, remove extra clocks; class times stay local.
-- Search: classes, teachers and tasks.
-- Data: export/import schedule, teachers, links, tasks, clocks, completion and theme; merge or replace.
-- Finish (m): end today’s selected class early; press again to undo.
-- To-do: daily school/life tasks; h lists all controls.
+Open **Settings** or press **Y**. Use arrows for quick adjustments; Enter or a click opens choices. Theme colors and square borders preview in Settings while preserving terminal transparency. **Save / Ctrl+S** applies changes; **Esc** discards unsaved changes. **Defaults** selects the default values; Save applies them.
 
-Week view is Monday–Friday, adding weekend days only when events are scheduled. Reminders and progress follow today’s unfinished events. Setup offers empty, customize now, or private preset import. Exports contain meeting links; keep private data off GitHub.
+- StudentDaily: 12/24-hour clocks, clock seconds, week numbers, teacher details, default event length, reminders, progress, weekends and task summary.
+- Appearance: theme, opacity, borders, widget visibility and text. Noctalia also supports animation controls.
 
-## Appearance and development
+Widget settings take effect on the next poll. Opacity applies to newly launched windows. Settings belong only to this app.
 
-Open theme/appearance for nine palettes. Arrows preview, Enter/click saves, Esc cancels, n resets Nord. Opacity defaults to 94%. Reopen windows after code or launch-setting changes. Settings respect XDG directories; runtime data stays outside the source tree.
+## Desktop bars
 
-`bin/` apps, `plugins/` Noctalia widgets, `integrations/` other bars, `services/` startup, `packaging/` installer.
+- **Noctalia 5.3+**: native widgets with hover details.
+- **Waybar**: custom modules and tooltips. Restart Waybar after installation. JSONC values are preserved; formatting and comments are rewritten.
+- **Caelestia**: requires a writable shell checkout using `--caelestia-root`. The installer adds a QML component; restart the shell afterward. This integration has syntax/integration checks but has not been visually tested in a running Caelestia session.
+- **No bar**: use the apps and optional background services on their own.
 
-```sh
-noctalia plugins lint plugins/*
-python3 build-release.py
-```
+Right-click a widget to reload and open its app.
 
-Rebuild after edits. Upload this source folder, including `.gitignore`, and attach `release.tar.gz` to releases. Files starting `PRIVATE-` are personal copies, not public releases.
+## Arch packaging
+
+Separate Arch package builds are available through `build-arch.py`. See [Arch packaging](packaging/aur/README.md) for local builds and future AUR release preparation. AUR submission is pending; the release source can already be built locally with `makepkg`.
+
+## License
+
+MIT · jdkcube

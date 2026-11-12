@@ -75,24 +75,33 @@ def configure_alternative(root,components,backend):
                 entries=bar.setdefault(section,[]);index=entries.index('clock') if 'clock' in entries else 0
                 entries.insert(index,key);bar[key]=definitions[key]
         path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(current,indent=2)+'\n')
-        css=directory/'suite.css';css.write_text((root/'integrations/waybar/style.css').read_text())
         style=directory/'style.css';text=style.read_text() if style.exists() else ''
-        if '@import "suite.css";' not in text:style.write_text('@import "suite.css";\n'+text)
+        for component in components:
+            name='studentdaily' if component=='classes' else 'keepitnew'
+            css=directory/(name+'.css')
+            css.write_text('\n'.join(line for line in (root/'integrations/waybar/style.css').read_text().splitlines() if '#custom-'+name in line)+'\n')
+            directive='@import "'+name+'.css";'
+            if directive not in text:text=directive+'\n'+text
+        style.write_text(text)
         print('Waybar modules configured. Restart Waybar to load newly added modules.')
     elif backend=='caelestia':
         shell=Path(os.environ['SUITE_CAELESTIA_ROOT']).expanduser()
         bar=shell/'modules/bar/Bar.qml'
         text=bar.read_text()
         if 'ColumnLayout {' not in text or 'Repeater {' not in text:raise ValueError('Unsupported Caelestia Bar.qml layout')
-        destination=bar.parent/'studentdaily-keepitnew';destination.mkdir(exist_ok=True)
         import shutil
-        shutil.copy2(root/'integrations/caelestia/AppWidget.qml',destination/'AppWidget.qml')
-        if 'import "studentdaily-keepitnew" as Suite' not in text:
-            index=text.index('import QtQuick');text=text[:index]+'import "studentdaily-keepitnew" as Suite\n'+text[index:]
         for component in components:
+            name='studentdaily' if component=='classes' else 'keepitnew'
+            alias='StudentDaily' if component=='classes' else 'KeepItNew'
+            filename=alias+'Widget.qml'
+            destination=bar.parent/name;destination.mkdir(exist_ok=True)
+            shutil.copy2(root/'integrations/caelestia'/filename,destination/filename)
+            declaration='import "'+name+'" as '+alias
+            if declaration not in text:
+                index=text.index('import QtQuick');text=text[:index]+declaration+'\n'+text[index:]
             begin='    // BEGIN SUITE '+component;end='    // END SUITE '+component
             text=re.sub(re.escape(begin)+r'.*?'+re.escape(end)+r'\n?','',text,flags=re.S)
-            fragment=begin+'\n    Suite.AppWidget { app: "'+component+'"; Layout.alignment: Qt.AlignHCenter }\n'+end+'\n\n'
+            fragment=begin+'\n    '+alias+'.'+alias+'Widget { Layout.alignment: Qt.AlignHCenter }\n'+end+'\n\n'
             index=text.index('    Repeater {');text=text[:index]+fragment+text[index:]
         bar.write_text(text)
         print('Caelestia editable checkout configured. Restart that shell instance to load widgets.')
@@ -138,11 +147,11 @@ def main():
         values=arrays[location]
         if component=='classes':values.insert(values.index('clock') if 'clock' in values else 0,widget)
         else:values.insert(values.index('wallpaper')+1 if 'wallpaper' in values else 0,widget)
-        plugin='nord-desktop/'+component
+        plugin=tomllib.loads((root/'plugins'/component/'plugin.toml').read_text())['id']
         (config_dir/('nord-'+component+'.toml')).write_text(f'[widget.{widget}]\ntype = "{plugin}:bar"\ncapsule = false\nshow_tooltip = true\n')
     enabled=list(current.get('plugins',{}).get('enabled',[]))
     for component in components:
-        plugin='nord-desktop/'+component
+        plugin=tomllib.loads((root/'plugins'/component/'plugin.toml').read_text())['id']
         if plugin not in enabled:enabled.append(plugin)
     settings=state_dir/'settings.toml';text=settings.read_text() if settings.exists() else ''
     text=table_update(text,'bar.default',{key:json.dumps(value) for key,value in arrays.items()})

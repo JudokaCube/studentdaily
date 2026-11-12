@@ -7,9 +7,9 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
-# Load the shared module beside this executable, including standalone source runs.
+# Load StudentDaily helpers beside this executable, including source runs.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-import nord_theme
+import studentdaily_ui as nord_theme
 from zoneinfo import ZoneInfo
 
 SELF = os.path.realpath(__file__)
@@ -69,14 +69,130 @@ def load_timezones():
     return zones
 
 
+def display_time(value, seconds=False):
+    """Format for display only; scheduling and serialized data stay HH:MM."""
+    if isinstance(value,str):hour,minute=map(int,value.split(':')[:2]);second=0
+    else:hour,minute,second=value.hour,value.minute,value.second
+    tail=f':{second:02d}' if seconds else ''
+    if nord_theme.options('classes')['classes_time_format']=='12':return f'{hour%12 or 12}:{minute:02d}'+tail+(' AM' if hour<12 else ' PM')
+    return f'{hour:02d}:{minute:02d}'+tail
+
+
+def display_teacher(event):
+    return event.get('teacher','') if nord_theme.options('classes')['classes_teacher_details'] else ''
+
+
+def default_event_end():
+    hour,minute=divmod(9*60+nord_theme.options('classes')['classes_default_duration'],60)
+    return f'{hour:02d}:{minute:02d}'
+
+
 def timezone_text(now):
-    parts=[f'Local {now.astimezone():%H:%M %Z}']
+    seconds=nord_theme.options('classes')['classes_clock_seconds']
+    local=now.astimezone()
+    parts=[f'Local {display_time(local,seconds)} {local:%Z}']
     for item in load_timezones():
-        parts.append(f"{item['label']} {now.astimezone(ZoneInfo(item['zone'])):%H:%M %Z}")
+        zone=now.astimezone(ZoneInfo(item['zone']))
+        parts.append(f"{item['label']} {display_time(zone,seconds)} {zone:%Z}")
     return '   '.join(parts)
 
 
+def text_dialog(title, value='', hint=''):
+    import curses
+    def screen(win):
+        nonlocal value
+        win.keypad(True);curses.curs_set(0);curses.start_color();curses.use_default_colors()
+        nord_theme.curses_colors(curses,win)
+        while True:
+            h,w=win.getmaxyx();win.erase();nord_theme.menu_frame(curses,win)
+            for y,text in ((1,title),(3,hint),(5,'› '+value[-max(1,w-7):]),(h-2,'Enter Save · Ctrl+U Clear · Esc Cancel')):
+                if 0<=y<h-1:
+                    try:win.addnstr(y,2,text,max(0,w-4),curses.color_pair(2 if y==5 else 1))
+                    except curses.error:pass
+            win.refresh()
+            try:key=win.get_wch()
+            except curses.error:continue
+            if key in ('\x1b','\x03'):return None
+            if key in ('\n','\r'):return value.strip()
+            if key=='\x15':value=''
+            elif key in (curses.KEY_BACKSPACE,'\x7f','\b'):value=value[:-1]
+            elif isinstance(key,str) and key.isprintable():value+=key
+    return nord_theme.run_screen(screen)
+
+
+def choose_menu(title, items, hint='', win=None, searchable=False):
+    """Visible choices with keyboard, mouse and optional type-to-filter search."""
+    import curses
+    def screen(window):
+        window.keypad(True);curses.curs_set(0)
+        curses.start_color();curses.use_default_colors();curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        nord_theme.curses_colors(curses,window)
+        selected=0;query='';offset=0
+        while True:
+            visible=[item for item in items if query.casefold() in (' '.join(str(v) for v in item[1:])).casefold()]
+            selected=max(0,min(selected,len(visible)-1));h,w=window.getmaxyx();size=max(1,h-10)
+            offset=min(offset,selected)
+            if selected>=offset+size:offset=selected-size+1
+            window.erase();nord_theme.menu_frame(curses,window)
+            def put(y,text,style=0):
+                if 0<=y<h-1:
+                    try:window.addnstr(y,2,text,max(0,w-4),style)
+                    except curses.error:pass
+            put(1,title,curses.color_pair(1)|curses.A_BOLD)
+            put(2,('Search: '+query+' · type to filter') if searchable else hint)
+            for i,item in enumerate(visible[offset:offset+size],offset):
+                put(4+i-offset,(('› ' if selected==i else '  ')+item[1]).ljust(max(0,w-4)),curses.color_pair(2) if selected==i else 0)
+            if not visible:put(4,'No matches. Backspace clears your search.')
+            if visible and len(visible[selected])>2:
+                import textwrap
+                for row,text in enumerate(textwrap.wrap(visible[selected][2],max(1,w-4))[:3]):put(h-5+row,text,curses.color_pair(1))
+            put(h-2,'↑↓ Select · Enter Choose · Esc Back'+(' · '+str(len(visible))+' results' if searchable else ''))
+            window.refresh()
+            try:key=window.get_wch()
+            except curses.error:continue
+            if key in ('\x1b','\x03'):return None
+            if key==curses.KEY_MOUSE:
+                try:_,x,y,_,state=curses.getmouse()
+                except curses.error:continue
+                if state & curses.BUTTON4_PRESSED:key=curses.KEY_UP
+                elif state & getattr(curses,'BUTTON5_PRESSED',0):key=curses.KEY_DOWN
+                elif state & (curses.BUTTON1_CLICKED|curses.BUTTON1_PRESSED) and 4<=y<4+min(size,len(visible)-offset):selected=offset+y-4;key='\n'
+                else:continue
+            if key in ('\n','\r') and visible:return visible[selected][0]
+            if key in (curses.KEY_UP,curses.KEY_DOWN,'\t'):
+                selected=max(0,min(len(visible)-1,selected+(-1 if key==curses.KEY_UP else 1)))
+            elif key in (curses.KEY_NPAGE,curses.KEY_PPAGE):selected=max(0,min(len(visible)-1,selected+(size if key==curses.KEY_NPAGE else -size)))
+            elif searchable and key in (curses.KEY_BACKSPACE,'\x7f','\b'):query=query[:-1];selected=offset=0
+            elif searchable and isinstance(key,str) and key.isprintable():query+=key;selected=offset=0
+    if win is not None:return screen(win)
+    return nord_theme.run_screen(screen)
+
+
 def edit_timezones():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():return edit_timezones_text()
+    from zoneinfo import available_timezones
+    while True:
+        zones=load_timezones()
+        action=choose_menu('STUDENTDAILY / CLOCKS', [('add','+ Add clock')]+[(i,item['label']+' · '+item['zone']) for i,item in enumerate(zones)],'Local time is always shown. Select a clock to change it.')
+        if action is None:return
+        if action!='add':
+            operation=choose_menu(zones[action]['label'],[('change','Change city / timezone'),('rename','Rename clock'),('delete','Remove this clock')])
+            if operation is None:continue
+            if operation=='rename':
+                label=text_dialog('CLOCK LABEL',zones[action]['label'])
+                if label:zones[action]['label']=label;atomic_json(TIMEZONE_FILE,zones)
+                continue
+            if operation=='delete':
+                zones.pop(action);atomic_json(TIMEZONE_FILE,zones);continue
+        zone=choose_menu('CHOOSE A TIMEZONE',[(z,z.replace('_',' ')) for z in sorted(available_timezones())],searchable=True)
+        if zone is None:continue
+        item={'label':zone.rsplit('/',1)[-1].replace('_',' '),'zone':zone}
+        if action=='add':zones.append(item)
+        else:zones[action]=item
+        atomic_json(TIMEZONE_FILE,zones)
+
+
+def edit_timezones_text():
     from zoneinfo import available_timezones
     while True:
         zones=load_timezones()
@@ -293,7 +409,7 @@ def edit_schedule_text(initial_date=None):
             print(f"\n{date:%A %d %B %Y}")
             events = events_on(date, data)
             for i, event in enumerate(events, 1):
-                print(f" {i}. {event['start']}–{event['end']}  {event['subject']}")
+                print(f" {i}. {display_time(event['start'])}–{display_time(event['end'])}  {event['subject']}")
             if not events:
                 print(" Nothing scheduled.")
             action = input("\n[A] Add  [E] Edit  [D] Delete  [R] Restore date  [G] Go to date  [S] Save  [Q] Cancel: ").strip().lower()
@@ -363,7 +479,7 @@ def event_form_rows(event, scope, new=False):
     rows=[('kind','Type'),('subject','Title')]
     if new:rows.append(('date','Date YYYY-MM-DD'))
     rows += [('start','Start HH:MM'),('end','End HH:MM'),('scope','Repeats' if new else 'Apply to')]
-    if scope!='once':rows += [('day'+str(i),DAYS[i].capitalize()) for i in range(7 if event.get('kind')=='personal' else 5)]
+    if scope!='once':rows += [('days_preset','Repeat pattern')]+[('day'+str(i),DAYS[i].capitalize()) for i in range(7 if event.get('kind')=='personal' else 5)]
     if event.get('kind','class')=='class':rows += [('teacher','Teacher'),('url','Meeting link')]
     rows += [('save','Save event')]
     if not new:rows += [('delete','Delete event')]
@@ -395,7 +511,7 @@ def edit_schedule(initial_date=None):
     def screen(win):
         curses.raw();curses.curs_set(0);win.keypad(True);curses.start_color();curses.use_default_colors()
         curses.mousemask(curses.ALL_MOUSE_EVENTS);curses.mouseinterval(0)
-        nord_theme.curses_colors(curses,win)
+        nord_theme.curses_colors(curses,win,personal_role=nord_theme.options('classes')['classes_personal_color'])
         date=initial_date or datetime.now().date();selected=0;offset=0;message='';date_input=None;restore=False
         def put(y,text,style=0):
             h,w=win.getmaxyx()
@@ -416,14 +532,14 @@ def edit_schedule(initial_date=None):
             return None
         def form(old=None):
             new=old is None
-            event=copy.deepcopy(old) if old else {'id':new_id(),'subject':'','kind':'class','start':'09:00','end':'09:30','teacher':'','url':'','days':[date.weekday()]}
+            event=copy.deepcopy(old) if old else {'id':new_id(),'subject':'','kind':'class','start':'09:00','end':default_event_end(),'teacher':'','url':'','days':[date.weekday()]}
             event.setdefault('kind','class')
             stamp=date.isoformat();scope='once';focus=0;scroll=0;notice='';confirm=False;replace=True
             repeat=any(s['id']==event['id'] for s in DATA['series'])
             scopes=['once','new'] if new else ['once','future','all'] if repeat else ['once']
             while True:
                 rows=event_form_rows(event,scope,new);focus=min(focus,len(rows)-1)
-                h,w=win.getmaxyx();win.erase()
+                h,w=win.getmaxyx();win.erase();nord_theme.menu_frame(curses,win)
                 if h<12 or w<45:
                     put(1,'Resize to at least 45 columns × 12 rows.');put(3,'Esc cancels.');win.refresh()
                     if keypress()=='\x1b':return
@@ -436,11 +552,15 @@ def edit_schedule(initial_date=None):
                     if field=='date':value=stamp
                     elif field=='kind':value='Personal · theme accent' if event['kind']=='personal' else 'Class'
                     elif field=='scope':value={'once':'This date only','new':'Weekly','future':'This and following','all':'All occurrences'}[scope]
+                    elif field=='days_preset':value='Choose weekdays / daily / custom'
                     elif field.startswith('day'):value='[x]' if int(field[3:]) in event['days'] else '[ ]'
                     elif field in ('save','delete','cancel'):value=''
                     else:value=event.get(field,'') or '—'
                     put(4+j-scroll,('› ' if focus==j else '  ')+label+('  '+value if value else ''),curses.color_pair(2) if focus==j else curses.color_pair(4) if event['kind']=='personal' else 0)
-                put(h-3,notice or ('Enter toggles choices · Ctrl+S saves · Esc cancels'),curses.color_pair(1))
+                summary=('Only '+stamp+' changes; other dates stay unchanged.' if scope=='once' else
+                         'Weekly: '+', '.join(DAYS[d].capitalize()[:3] for d in event['days'])+' · '+('from '+stamp if scope in ('new','future') else 'entire series'))
+                put(3,summary,curses.color_pair(1))
+                put(h-3,notice or ('Enter opens choices · Ctrl+S saves · Esc cancels'),curses.color_pair(1))
                 put(h-2,f'{focus+1}/{len(rows)} · Click a field to edit; click Save when ready')
                 win.refresh();key=keypress();mouse=click(key)
                 if mouse:
@@ -459,12 +579,29 @@ def edit_schedule(initial_date=None):
                     event['kind']='personal' if event['kind']=='class' else 'class'
                     if event['kind']=='class':event['days']=[d for d in event['days'] if d<5]
                     confirm=False
-                elif field=='scope' and activate:scope=scopes[(scopes.index(scope)+(-1 if key==curses.KEY_LEFT else 1))%len(scopes)];confirm=False
+                elif field=='scope' and activate:
+                    descriptions={
+                        'once':('Only '+date.strftime('%a %d %b'),'Other dates stay unchanged.'),
+                        'new':('Repeat every week','Choose the weekdays in the event form.'),
+                        'future':('This date and future dates','Earlier dates stay unchanged; later overrides are replaced.'),
+                        'all':('Entire repeating series','Includes past dates and replaces date-specific overrides.')}
+                    chosen=choose_menu('WHEN SHOULD THIS APPLY?',[(v,*descriptions[v]) for v in scopes],win=win)
+                    if chosen is not None:scope=chosen
+                    confirm=False
+                elif field=='days_preset' and activate:
+                    patterns=[('weekdays','Weekdays · Mon–Fri'),('today','Every '+date.strftime('%A')),('custom','Keep my selected days')]
+                    if event['kind']=='personal':patterns.insert(1,('daily','Every day · Mon–Sun'))
+                    chosen=choose_menu('REPEAT PATTERN',patterns,win=win)
+                    if chosen=='weekdays':event['days']=list(range(5))
+                    elif chosen=='daily':event['days']=list(range(7))
+                    elif chosen=='today':event['days']=[date.weekday()]
+                    confirm=False
                 elif field.startswith('day') and activate:
                     day=int(field[3:]);event['days']=sorted(set(event['days'])^{day});confirm=False
                 elif field=='cancel' and activate:return
                 elif field in ('save','delete') and activate:
-                    if field=='delete' and not confirm:confirm=True;notice='Delete with this scope? Press Enter or click Delete again.';continue
+                    if field=='delete':
+                        if choose_menu('DELETE EVENT?', [('cancel','Keep event'),('delete','Delete: '+event['subject'],summary)],win=win)!='delete':continue
                     try:
                         target=valid_date(stamp) if new else date
                         candidate=commit_event(DATA,target,old,event,scope,new,field=='delete')
@@ -486,7 +623,7 @@ def edit_schedule(initial_date=None):
         while True:
             load_config()
             baseline=Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b''
-            events=events_on(date);h,w=win.getmaxyx();win.erase()
+            events=events_on(date);h,w=win.getmaxyx();win.erase();nord_theme.menu_frame(curses,win)
             if h<12 or w<45:
                 put(1,'Resize to at least 45 columns × 12 rows.');put(3,'Esc returns.');win.refresh()
                 if keypress()=='\x1b':return
@@ -497,7 +634,7 @@ def edit_schedule(initial_date=None):
             put(1,'STUDENTDAILY / SCHEDULE',curses.color_pair(1)|curses.A_BOLD)
             put(2,f'{date:%A %d %B %Y}   ← Previous day   Next day →')
             for i,(kind,e) in enumerate(items[offset:offset+size],offset):
-                label='[ + Add event ]' if kind=='add' else '[ Restore this date ]' if kind=='restore' else '[ Back ]' if kind=='back' else f"{e['start']}–{e['end']}  {e['subject']}  · {'Personal' if e.get('kind')=='personal' else 'Class'}"
+                label='[ + Add event ]' if kind=='add' else '[ Restore this date ]' if kind=='restore' else '[ Back ]' if kind=='back' else f"{display_time(e['start'])}–{display_time(e['end'])}  {e['subject']}  · {'Personal' if e.get('kind')=='personal' else 'Class'}"
                 put(4+i-offset,('› ' if i==selected else '  ')+label,curses.color_pair(2) if i==selected else curses.color_pair(4) if e and e.get('kind')=='personal' else 0)
             put(h-3,('Date: '+date_input+' · Enter go · Esc cancel') if date_input is not None else message or '↑↓ Select · Enter Edit · A Add · G Date · T Today · Esc Back',curses.color_pair(1))
             put(h-2,'Each Save applies immediately. Esc discards the open form.')
@@ -532,7 +669,7 @@ def edit_schedule(initial_date=None):
                 restore=False
                 message=form(e) or 'Changes cancelled.'
     from pathlib import Path
-    try:curses.wrapper(screen)
+    try:nord_theme.run_screen(screen)
     except KeyboardInterrupt:pass
 
 
@@ -579,11 +716,11 @@ def search_all(query):
     for item in DATA['series']:
         if query in ' '.join(str(item.get(k,'')) for k in ('subject','teacher','start','end')).casefold():
             days=', '.join(DAYS[d][:3].title() for d in item['days'])
-            results.append(f"{'PERSONAL' if item.get('kind')=='personal' else 'CLASS'}   {item['subject']} · {item.get('teacher','')} · {days} {item['start']}–{item['end']}")
+            results.append(f"{'PERSONAL' if item.get('kind')=='personal' else 'CLASS'}   {item['subject']} · {item.get('teacher','')} · {days} {display_time(item['start'])}–{display_time(item['end'])}")
     for date,changes in DATA['exceptions'].items():
         for item in changes.values():
             if item and query in (date+' '+item['subject']+' '+item.get('teacher','')).casefold():
-                results.append(f"CHANGED {date} · {item['subject']} · {item.get('teacher','')} · {item['start']}")
+                results.append(f"CHANGED {date} · {item['subject']} · {item.get('teacher','')} · {display_time(item['start'])}")
     for date,tasks in sorted(load_tasks().items()):
         for task in tasks:
             if query in (date+' '+task['text']+' '+task['category']).casefold():
@@ -655,6 +792,29 @@ def import_bundle(path,mode='merge'):
 
 
 def data_menu():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():return data_menu_text()
+    while True:
+        action=choose_menu('STUDENTDAILY / DATA',[
+            ('export','Export to a JSON file','Includes events, teachers, links, tasks, clocks and theme.'),
+            ('import','Import from a JSON file','Merge with your data or replace it.')])
+        if action is None:return
+        value=text_dialog('EXPORT FILE' if action=='export' else 'IMPORT FILE', '~/Downloads/studentdaily-export.json' if action=='export' else '', 'Full file path · ~ means your home folder')
+        if not value:continue
+        path=Path(value).expanduser()
+        try:
+            if action=='export':
+                if path.exists() and choose_menu('FILE ALREADY EXISTS',[('cancel','Cancel'),('replace','Replace this export file')])!='replace':continue
+                export_bundle(path);notice='Export saved: '+str(path)
+            else:
+                mode=choose_menu('HOW SHOULD DATA BE IMPORTED?', [('merge','Merge with current data','Retains other existing entries; matching IDs are updated.'),('replace','Replace current data','Replaces the data categories present in the file.')])
+                if mode is None:continue
+                if mode=='replace' and choose_menu('REPLACE EXISTING DATA?', [('cancel','Cancel'),('replace','Replace with this file')])!='replace':continue
+                import_bundle(path,mode);notice='Import complete.'
+        except (ValueError,OSError,KeyError,TypeError) as exc:notice='Could not complete: '+str(exc)
+        choose_menu('STUDENTDAILY / DATA', [('back','Back',notice)])
+
+
+def data_menu_text():
     from pathlib import Path
     print('STUDENTDAILY DATA · schedule, teachers, meeting links, tasks, timezones and theme')
     action=input('[E] Export  [I] Import  [Enter] Back: ').strip().lower()
@@ -717,7 +877,7 @@ def load_theme():
     palette=nord_theme.palette()
     bg=palette['background']
     BASE_STYLE="\033[48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+"m\033["+_fg(palette['text'])+"m"
-    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette['green'],palette['purple'],palette['surface'],palette['dim'],palette['text'])))
+    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette['green'],nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text'])))
     for name, color in colors.items():
         globals()[name] = _fg(color)
 
@@ -786,13 +946,18 @@ def teacher_of(subject):
     return TEACHERS.get(subject, "")
 
 
+def show_weekend(date):
+    mode=nord_theme.options('classes')['classes_weekends']
+    return mode=='show' or (mode=='auto' and bool(events_on(date)))
+
+
 def render_week():
     now = datetime.now()
     today = day_name(now)
     ns = now_seconds(None)
     parts = []
     for d in DAYS:
-        if d not in WEEKDAYS and not events_on(date_for_day(d)):continue
+        if d not in WEEKDAYS and not show_weekend(date_for_day(d)):continue
         parts.append(render_day(d, ns, d == today))
     return "\n".join(parts)
 
@@ -844,8 +1009,8 @@ def progress_meter(percent,width=10):
 def notify_check(notifier, now=None):
     now = now or datetime.now()
     load_config()
-    if not nord_theme.preferences().get("reminders",True):return
-    lead=max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))
+    if not nord_theme.options("classes")["reminders"]:return
+    lead=nord_theme.options("classes")["reminder_minutes"]
     stamp = now.date().isoformat()
     seconds = now.hour * 3600 + now.minute * 60 + now.second
     state = load_state()
@@ -884,7 +1049,7 @@ def reminder_daemon(once=False):
         api = dbus.Interface(proxy, "org.freedesktop.Notifications")
         actions = ["join", "Join"] if event.get("url") else []
         import html
-        body = html.escape(" · ".join(x for x in (event["start"],event.get("teacher", "")) if x))
+        body = html.escape(" · ".join(x for x in (display_time(event["start"]),display_teacher(event)) if x))
         notification = api.Notify("StudentDaily", 0, nord_theme.notification_icon("personal" if event.get("kind")=="personal" else "calendar"),
                                   f"{short_subject(event['subject'])} in {minutes} min", body,
                                   dbus.Array(actions, signature="s"),
@@ -984,7 +1149,7 @@ def render_left(now_sec, day):
     label='event' if len(events)==1 else 'events'
     out=['  '+c(ACCENT,f'{len(events)} {label} left')]
     for event in events:
-        out.append(c(NEXT if event.get("kind")=="personal" else TEXT,f"   {event['start']}–{event['end']}   {event['subject']}  ")+c(DIM,event.get('teacher','')))
+        out.append(c(NEXT if event.get("kind")=="personal" else TEXT,f"   {display_time(event['start'])}–{display_time(event['end'])}   {event['subject']}  ")+c(DIM,display_teacher(event)))
     return '\n'.join(out)
 
 
@@ -1010,7 +1175,7 @@ def render_free(now_sec, day, is_today):
             else:
                 left = hm(s) * 60 - now_sec
                 tail = c(NEXT, f"in {fmt_delta_sec(left)}")
-        line = f"   {s}–{e}   {kind:<7}"
+        line = f"   {display_time(s)}–{display_time(e)}   {kind:<7}"
         out.append(line + (" " + tail if tail else ""))
     return "\n".join(out)
 
@@ -1027,7 +1192,7 @@ def render_subject(query):
             if cell and cell[0] == subject:
                 s, e = periods_for(day)[i]
                 room = cell[1] if cell[1] else "–"
-                out.append(f"   {day:<10} {s}–{e}   " + c(ROOM, room))
+                out.append(f"   {day:<10} {display_time(s)}–{display_time(e)}   " + c(ROOM, room))
                 count += 1
     out.append(c(DIM, f"   {count}x per week"))
     out.append("")
@@ -1302,8 +1467,8 @@ def clock_loop():
         with RawKeys() as keys:
             while True:
                 now = datetime.now()
-                date = now.strftime("%A %-d %B · %p").lower()
-                secs = now.strftime("%S")
+                date = now.strftime("%A %-d %B").lower()
+                secs = now.strftime("%S") if nord_theme.options("classes")["classes_clock_seconds"] else ""
 
                 below = [
                     (c(DIM, secs) + "   " + c(ACCENT, date), len(secs) + 3 + len(date)),
@@ -1317,7 +1482,7 @@ def clock_loop():
                     if vis is None:
                         vis = len(re.sub(r"\033\[[0-9;]*m", "", text))
                     fixed.append((text, vis))
-                sys.stdout.write(clear + frame(now.strftime("%I:%M"), fixed, ACCENT) + "\n")
+                sys.stdout.write(clear + frame(display_time(now), fixed, ACCENT) + "\n")
                 sys.stdout.flush()
                 k = keys.read(1 - (time.time() % 1))
                 if k and k.lower() == "q":
@@ -1560,26 +1725,30 @@ def widget_status(now=None):
             class_progress = min(99, int(elapsed * 100 / duration))
             progress_bar = progress_meter(class_progress,10)
             text = f"{short_subject(subject)[:16]} {progress_meter(class_progress,8)} {class_progress}%"
-            color = "#"+palette["purple" if personal else "green"]
+            color = "#"+(nord_theme.personal_color() if personal else palette["green"])
             break
         if hm(start) * 60 > seconds:
             left = (hm(start) * 60 - seconds + 59) // 60
             text = f"{short_subject(subject)} in {fmt_delta(left)}"
-            color = "#"+palette["purple" if personal else "accent"]
+            color = "#"+(nord_theme.personal_color() if personal else palette["accent"])
             break
     soon = [hm(e["start"])*60-seconds for e in dated_events
-            if 0 < hm(e["start"])*60-seconds <= max(1,min(60,int(nord_theme.preferences().get("reminder_minutes",5))))*60]
-    expand_until = int(now.timestamp()+min(soon)) if soon else 0
+            if 0 < hm(e["start"])*60-seconds <= nord_theme.options("classes")["reminder_minutes"]*60]
+    prefs=nord_theme.options('classes')
+    expand_until = int(now.timestamp()+min(soon)) if soon and prefs['classes_auto_expand'] and prefs['classes_widget_mode']!='icon' else 0
+    if not prefs['classes_progress'] and class_progress is not None:
+        class_progress=None
+        text=f"{short_subject(subject)} · {left}m left"
     tips = [["STUDENTDAILY", now.strftime("%A · %d %B")]]
     if class_progress is not None:
         tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
     for event in dated_events:
-        detail="Personal" if event.get("kind")=="personal" else event.get("teacher","")
-        tips.append([f"{event['start']}–{event['end']}", f"{short_subject(event['subject'])} · {detail}".rstrip(" ·")])
+        detail="Personal" if event.get("kind")=="personal" else display_teacher(event)
+        tips.append([f"{display_time(event['start'])}–{display_time(event['end'])}", f"{short_subject(event['subject'])} · {detail}".rstrip(" ·")])
     if not events:
         tips.append(["Today", "No events scheduled"])
     tips.append(["Click", "Open schedule and menu"])
-    return {"visible": True, "glyph": "calendar", "text": text,
+    return {**nord_theme.widget_options("classes"), "glyph": "calendar", "text": text,
             "textColor": color, "glyphColor": color, "fontWeight": "medium", "tips": tips, "expandUntil": expand_until, "classProgress": class_progress}
 
 
@@ -1599,11 +1768,13 @@ def panel(title, lines, width=None):
     width = width or max(24, min(94, shutil.get_terminal_size((90, 24)).columns - 4))
     inside = width - 4
     heading = f" {title} "[:width - 4]
-    out = [c(ACCENT, "┌─" + heading + "─" * max(0, width - len(heading) - 3) + "┐")]
+    tl,tr,bl,br,horiz,vert=nord_theme.frame('classes')
+    border=_fg(nord_theme.border_color('classes'))
+    out = [c(border, tl+horiz + heading + horiz * max(0, width - len(heading) - 3) + tr)]
     for line in lines:
         line = clip_ansi(line, inside)
-        out.append(c(DIM, "│ ") + line + " " * max(0, inside - visible_len(line)) + c(DIM, " │"))
-    out.append(c(ACCENT, "└" + "─" * (width - 2) + "┘"))
+        out.append(c(border, vert+" ") + line + " " * max(0, inside - visible_len(line)) + c(border, " "+vert))
+    out.append(c(border, bl + horiz * (width - 2) + br))
     return "\n".join("  " + line for line in out)
 
 
@@ -1625,6 +1796,7 @@ def day_panel(date, selected=-1, now_sec=None):
     seconds = now_seconds(None) if now_sec is None else now_sec
     content, targets = [], {}
     completed=load_completed()
+    prefs=nord_theme.options("classes")
     for i, event in enumerate(events):
         start, end, subject = event["start"], event["end"], event["subject"]
         finished=event_finished(event,date,completed)
@@ -1635,16 +1807,16 @@ def day_panel(date, selected=-1, now_sec=None):
         marker = "▸" if i == selected else " "
         join = c(ACCENT, "  [Join]") if event.get("url") and event.get("kind")!="personal" else ""
         targets[1+len(content)] = ("event", event)
-        targets[2+len(content)] = ("event", event)
-        content.append(c(color, f"{marker} {start}–{end}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
+        if not prefs["classes_compact"]:targets[2+len(content)] = ("event", event)
+        content.append(c(color, f"{marker} {display_time(start)}–{display_time(end)}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
         duration = hm(end)-hm(start)
-        detail = " · ".join(x for x in ("Personal" if event.get("kind")=="personal" else event.get("teacher", ""), f"{duration} min") if x)
+        detail = " · ".join(x for x in ("Personal" if event.get("kind")=="personal" else display_teacher(event), f"{duration} min") if x)
         if active:
             left = hm(end)*60-seconds
             percent=min(99,int((duration*60-left)*100/(duration*60)))
             detail += " · " + fmt_delta_sec(left) + " left"
-        content.append(c(DIM,"    "+detail))
-        if active:content.append(c(color,"    "+progress_meter(percent)+f" {percent}%"))
+        if not prefs["classes_compact"]:content.append(c(DIM,"    "+detail))
+        if active and prefs["classes_progress"]:content.append(c(color,"    "+progress_meter(percent)+f" {percent}%"))
         content.append("")
     if content:
         content.pop()
@@ -1735,7 +1907,7 @@ E Schedule editor      R Teachers          F Search classes/teachers/tasks
 Z Join current/next (or selected) class · M Finish/undo today
 T Timer     C Class countdown               O Clock
 N Now       L Classes left                 B Breaks
-I Timezones   S Import/export   Y Theme
+I Timezones   S Import/export   Y Settings
 P Separate window      H Help              Q Quit
 
 EDITING
@@ -1803,6 +1975,7 @@ def dashboard_header(now,date,view,cols,notice):
     import textwrap
     width=max(16,min(94,cols-4))
     left="STUDENTDAILY / "+date.strftime("%a %d %b").upper()
+    if nord_theme.options("classes")["classes_week_numbers"]:left+=f" · W{date.isocalendar().week:02d}"
     clocks=timezone_text(now)
     if len(left)+len(clocks)+2<=width:
         rows=["  "+c(TEXT,left)+" "*(width-len(left)-len(clocks))+c(DIM,clocks)]
@@ -1810,11 +1983,12 @@ def dashboard_header(now,date,view,cols,notice):
         rows=["  "+c(TEXT,left)]+["  "+c(DIM,line) for line in textwrap.wrap(clocks,width=width)]
     rows.append("  "+c(DIM,"─"*width));hits={}
     active={"day":"d","week":"w","tasks":"u","teachers":"r"}.get(view)
-    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Theme")],active),
+    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Settings")],active),
                          ([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[("g","Date")],str(date.weekday()+1) if view=="day" and date.weekday()<5 else None)]:
         buttons,maps=wrapped_buttons(items,width,chosen)
         hits.update({len(rows)+i:v for i,v in maps.items()});rows.extend(buttons)
-    rows += ["  "+c(NOW,notice or widget_status(now)["text"]),""]
+    status=widget_status(now)
+    rows += ["  "+c(NOW if notice else _fg(status["textColor"]),notice or status["text"]),""]
     return rows,hits
 
 
@@ -1848,7 +2022,7 @@ def task_summary(date):
 def dashboard():
     global UI_ACTIVE
     UI_ACTIVE = True
-    view, date, query, offset = "day", datetime.now().date(), "", 0
+    view, date, query, offset = nord_theme.options("classes")["classes_start_view"], datetime.now().date(), "", 0
     follow_today, selected, notice = True, -1, ""
     sys.stdout.write("\033[?1049h\033[?25l"+BASE_STYLE+MOUSE_ON)
     try:
@@ -1865,7 +2039,7 @@ def dashboard():
             targets, tasks = {}, []
             if view == "day":
                 lines, targets = day_panel(date, selected)
-                summary=task_summary(date)
+                summary=task_summary(date) if nord_theme.options("classes")["classes_task_summary"] else []
                 lines.append("")
                 targets.update({len(lines)+row:("tasks_open",None) for row in range(len(summary))})
                 lines.extend(summary)
@@ -1873,7 +2047,7 @@ def dashboard():
                 lines = []
                 monday = date-timedelta(days=date.weekday())
                 for delta in range(7):
-                    if delta>4 and not events_on(monday+timedelta(days=delta)):continue
+                    if delta>4 and not show_weekend(monday+timedelta(days=delta)):continue
                     part, hits = day_panel(monday+timedelta(days=delta))
                     targets.update({len(lines)+row: hit for row,hit in hits.items()})
                     lines.extend(part+[""])
@@ -2001,7 +2175,7 @@ def dashboard():
                     if key=="s":
                         data_menu()
                     elif key=="y":
-                        nord_theme.picker()
+                        nord_theme.settings("classes")
                         load_theme()
                     elif key=="i":
                         edit_timezones()
@@ -2013,18 +2187,18 @@ def dashboard():
                         follow_today=False
                         selected=-1
                     elif key=="a":
-                        category=input("Category [S] School / [L] Life (Enter cancels): ").strip().lower()
+                        category=choose_menu("NEW TASK",[("s","School"),("l","Life")])
                         if category in ("s","l"):
-                            text=input("Task: ").strip()
+                            text=text_dialog("NEW TASK")
                             if text:task_change(date,"add",text=text,category="School" if category=="s" else "Life")
                         view="tasks"
                     elif key in ("x","v") and view=="tasks" and tasks:
                         task=tasks[max(0,selected)%len(tasks)]
                         if key=="x":
-                            if input(f"Delete '{task['text']}'? [y/N]: ").strip().lower()=="y":
+                            if choose_menu("DELETE TASK?",[("cancel","Keep task"),("delete","Delete",task["text"])])=="delete":
                                 task_change(date,"delete",task["id"])
                         else:
-                            text=input(f"Task [{task['text']}]: ").strip()
+                            text=text_dialog("EDIT TASK",task["text"])
                             if text:task_change(date,"edit",task["id"],text=text)
                     elif key=="t":
                         duration=input("Timer duration (minutes or 1h30m; Enter cancels): ").strip()
@@ -2039,7 +2213,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key in ("y","e"):sys.stdout.write("\033[?1049h")
+                if key in ("y","e","i","s","a","x","v"):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass
@@ -2051,6 +2225,11 @@ def dashboard():
 
 def main():
     argv = sys.argv[1:]
+    if argv == ["--version"]:
+        print("StudentDaily "+nord_theme.VERSION);return
+    if argv == ["settings"]:
+        nord_theme.settings("classes")
+        return
     if argv == ["theme"]:
         nord_theme.picker()
         return

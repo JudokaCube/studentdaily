@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+release/
+arch-build/
+*.pkg.tar.*
+*.tar.gz
+*PRIVATE*
+.env
