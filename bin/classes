@@ -83,9 +83,10 @@ def profile_name():
 def load_timezones():
     try:
         with open(TIMEZONE_FILE) as f:zones=json.load(f)
-    except FileNotFoundError:return list(DEFAULT_TIMEZONES)
+    except FileNotFoundError:return list(DEFAULT_TIMEZONES) if _ACTIVE_PROFILE=='default' else []
     if not isinstance(zones,list):raise ValueError('Timezones must be a list')
     for item in zones:
+        if not isinstance(item,dict):raise ValueError('Invalid timezone entry')
         if not isinstance(item.get('label'),str) or not item['label'].strip():raise ValueError('Timezone label required')
         ZoneInfo(item['zone'])
     return zones
@@ -1172,7 +1173,10 @@ def load_state():
     try:
         with open(STATE_FILE) as f:
             data=json.load(f)
-        return data if isinstance(data,dict) else {}
+        if not isinstance(data,dict):return {}
+        done=data.get('done',[])
+        if not isinstance(done,list) or any(not isinstance(key,str) for key in done):return {}
+        return data
     except (OSError, ValueError):
         return {}
 
@@ -2194,7 +2198,7 @@ def dashboard_header(now,date,view,cols,notice):
     groups=[([('d','Today'),('w','Week'),('u','Tasks'),('[','Calendars'),('.','More')],active)]
     if view=='week':groups.append(([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[('g','Date')],None))
     for items,chosen in groups:
-        buttons,maps=wrapped_buttons(items,width,chosen,shortcuts=False)
+        buttons,maps=wrapped_buttons(items,width,chosen,shortcuts=True)
         hits.update({len(rows)+i:v for i,v in maps.items()});rows.extend(buttons)
     status=widget_status(now)
     rows += ["  "+c(NOW if notice else _fg(status["textColor"]),notice or status["text"]),""]
@@ -2219,9 +2223,12 @@ def dashboard_footer(view,cols,events=None,tasks=None,selected=-1,date=None):
                 actions.append(('m','Undo finish' if event_finished(event,date,load_completed()) else 'Finish'))
     elif view=='week':actions=[('+','Add event'),('e','Edit schedule')]
     rows=['  '+c(DIM,'─'*width)];hits={}
-    buttons,maps=wrapped_buttons(actions+[('h','Help'),('q','Quit')],width,shortcuts=False)
+    buttons,maps=wrapped_buttons(actions+[('h','Help'),('q','Quit')],width,shortcuts=True)
     hits.update({len(rows)+i:[(a,b,'\r' if k=='enter' else k) for a,b,k in values] for i,values in maps.items()})
     rows.extend(buttons)
+    if (view=='day' and events) or (view=='tasks' and tasks):
+        hint='Tab select · ↑↓ scroll'
+        rows.append(' '*max(2,(cols-len(hint))//2)+c(DIM,hint))
     return rows,hits
 
 
@@ -2258,13 +2265,15 @@ def dashboard():
     try:
         while True:
             try:
+                previous_profile=_ACTIVE_PROFILE
                 load_theme()
                 reload_schedule()
+                if previous_profile!=_ACTIVE_PROFILE:selected=-1;offset=0;query=""
             except ValueError as exc:
                 notice = str(exc)
             now = datetime.now()
-            if follow_today:
-                date = now.date()
+            if follow_today and date!=now.date():
+                date = now.date();selected=-1;offset=0
             events = events_on(date)
             targets, tasks = {}, []
             if view == "day":

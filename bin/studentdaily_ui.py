@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.6'
+VERSION = '0.1.7'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -20,17 +20,23 @@ SETTINGS=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))/'classes/
 
 # The default profile retains legacy paths; additional calendars are isolated.
 PROFILE_ROOT=SETTINGS.parent
+_PROFILE_CACHE={}
 
 def profile_registry():
  path=PROFILE_ROOT/'profiles.json'
- try:data=json.loads(path.read_text())
+ import copy
+ try:
+  stat=path.stat();stamp=(str(path),stat.st_mtime_ns,stat.st_size,stat.st_ino)
+  if _PROFILE_CACHE.get('stamp')==stamp:return copy.deepcopy(_PROFILE_CACHE['data'])
+  data=json.loads(path.read_text())
  except FileNotFoundError:return {'active':'default','profiles':{'default':'My calendar'}}
  if not isinstance(data,dict) or not isinstance(data.get('profiles'),dict):raise ValueError('Invalid calendar registry')
  import re
  for identity,name in data['profiles'].items():
   if identity!='default' and not re.fullmatch(r'[a-f0-9]{32}',identity):raise ValueError('Invalid calendar ID')
   validate_profile_name(name)
- if 'default' not in data['profiles'] or data.get('active') not in data['profiles']:raise ValueError('Missing active calendar')
+ if 'default' not in data['profiles'] or not isinstance(data.get('active'),str) or data['active'] not in data['profiles']:raise ValueError('Missing active calendar')
+ _PROFILE_CACHE.update(stamp=stamp,data=copy.deepcopy(data))
  return data
 
 def validate_profile_name(name):
