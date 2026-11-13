@@ -1,6 +1,6 @@
 # Maintainer: jdkcube
 pkgname=studentdaily
-pkgver=0.1.3
+pkgver=0.1.4
 pkgrel=1
 pkgdesc='Class and personal-event organizer with reminders and desktop widgets'
 arch=('any')
@@ -8,8 +8,8 @@ url='https://github.com/JudokaCube/studentdaily'
 license=('MIT')
 depends=('python>=3.11' 'kitty' 'systemd' 'xdg-utils' 'tzdata' 'python-dbus' 'python-gobject' 'libnotify')
 optdepends=('waybar: optional desktop bar' 'quickshell: optional Caelestia widget' 'qt6-declarative: optional Caelestia QML integration')
-source=('studentdaily-0.1.3.tar.gz::https://github.com/JudokaCube/studentdaily/releases/download/v0.1.3/studentdaily-0.1.3.tar.gz')
-sha256sums=('87832389863e90c31b84beaa653e3c35f45f0629edc2cdf8df01915d9023dbbb')
+source=('studentdaily-0.1.4.tar.gz::https://github.com/JudokaCube/studentdaily/releases/download/v0.1.4/studentdaily-0.1.4.tar.gz')
+sha256sums=('8b5b6e32ead44417a46412867d4287a299cccf31cc358c23d027367ca5f56e43')
 
 check() {
     python - "$srcdir/$pkgname-$pkgver" <<'PY'
@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory() as temp:
     env=dict(os.environ,HOME=temp,XDG_CONFIG_HOME=temp+'/config',XDG_DATA_HOME=temp+'/data',XDG_CACHE_HOME=temp+'/cache',XDG_STATE_HOME=temp+'/state',PYTHONDONTWRITEBYTECODE='1')
     command=[sys.executable,str(root/'bin/classes')]
     version=subprocess.check_output(command+['--version'],env=env,text=True)
-    assert '0.1.3' in version,version
+    assert '0.1.4' in version,version
     args=['status','--waybar'] if 'studentdaily'=='studentdaily' else ['--waybar']
     status=json.loads(subprocess.check_output(command+args,env=env,text=True))
     assert isinstance(status,dict) and 'text' in status

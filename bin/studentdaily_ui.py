@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.3'
+VERSION = '0.1.4'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -117,17 +117,44 @@ def contrast_ratio(a,b):
 _COLOR_SESSION=0
 _TERMINAL_PALETTE=None
 
-def run_screen(screen):
- """Restore Kitty's original colors even when a menu fails or is cancelled."""
- import curses,sys
+from contextlib import contextmanager
+
+@contextmanager
+def terminal_session():
+ """Keep app colors local to this terminal session and restore them on exit."""
+ import sys
  global _COLOR_SESSION,_TERMINAL_PALETTE
  supported=sys.stdout.isatty() and bool(os.environ.get('KITTY_WINDOW_ID')) and not os.environ.get('TMUX')
  if supported:
   sys.stdout.write('\033]30001\033\\');sys.stdout.flush();_COLOR_SESSION+=1
- try:return curses.wrapper(screen)
+ try:yield
  finally:
   if supported:
    sys.stdout.write('\033]30101\033\\');sys.stdout.flush();_COLOR_SESSION-=1;_TERMINAL_PALETTE=None
+
+def run_screen(screen):
+ import curses
+ with terminal_session():return curses.wrapper(screen)
+
+def kitty_launch_options():
+ """Use an isolated app window; no global Kitty configuration is changed."""
+ import uuid
+ name=APP_NAME.lower()
+ return ['-o','dynamic_background_opacity=yes','-o','allow_remote_control=socket-only',
+         '--listen-on','unix:@'+name+'-'+uuid.uuid4().hex,
+         '-o','env='+name.upper()+'_WINDOW=1']
+
+def apply_opacity(value):
+ import subprocess
+ name=APP_NAME.lower();socket=os.environ.get('KITTY_LISTEN_ON','');window=os.environ.get('KITTY_WINDOW_ID','')
+ if (os.environ.get(name.upper()+'_WINDOW')!='1' or not socket.startswith('unix:@'+name+'-') or not window.isdigit()):
+  return 'Reopen from the widget or app launcher to apply opacity.'
+ try:
+  result=subprocess.run(['kitty','@','--to',socket,'set-background-opacity','--match','id:'+window,str(value)],
+                        stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=3)
+  if result.returncode==0:return 'Opacity applied to this window.'
+ except (OSError,subprocess.TimeoutExpired):pass
+ return 'Opacity saved; reopen the app window to apply it.'
 
 def terminal_palette(p):
  import sys
@@ -318,7 +345,7 @@ def settings_fields(app):
  yes=[(True,'On'),(False,'Off')]
  fields=[
   field('theme','Theme',[(name,name) for name in theme_names()],'Nord','Applies to this app and its widget after Save.'),
-  field('opacity','Window opacity',[(n/100,f'{n}%') for n in range(75,101)],.94,'Takes effect in the next window opened through this app’s launcher.'),
+  field('opacity','Window opacity',[(n/100,f'{n}%') for n in range(75,101)],.94,'Save updates opacity in app-launched Kitty windows. Older windows and other terminals need reopening from the widget or launcher.'),
   field(app+'_border','App borders',[(x,x.capitalize()) for x in ('single','double','ascii','none')],'single','Square terminal borders only; does not change desktop window decorations.'),
   field(app+'_border_color','Border color',[(x,label) for x,label in [('accent','Theme accent'),('purple','Secondary accent'),('dim','Muted')]],'accent','Built-in themes use this role. For Custom, edit Borders in Colors.'),
   field(app+'_widget','Bar widget',yes,True,'Hide or show this app’s installed widgets. Hidden widgets still poll so they can reappear.'),
@@ -408,6 +435,7 @@ def save_options(app,values):
     if previous_theme is None:SETTINGS.unlink(missing_ok=True)
     else:_write_bytes(SETTINGS,previous_theme)
    raise
+ opacity_note=apply_opacity(values['opacity']) if old.get('opacity',.94)!=values['opacity'] else ''
  if service_change:
   config=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))
   unit=config/'systemd/user/classes-reminders.service'
@@ -420,7 +448,7 @@ def save_options(app,values):
   except (OSError,subprocess.TimeoutExpired) as exc:return 'Settings saved; service change failed: '+str(exc)[:120]
   with (path.parent/'settings.lock').open('a') as lock:
    fcntl.flock(lock,fcntl.LOCK_EX);merged=preferences().copy();merged['service_pending']=False;_write_json(path,merged)
- return 'Saved. Return to the app to see changes. Opacity needs a new window.'
+ return 'Saved. '+opacity_note
 
 
 def settings(app):

@@ -27,7 +27,7 @@ This installer includes only StudentDaily and its widgets. Choose a bar, theme a
 
 Run `studentdaily`. Local installs also provide `classes`, with optional `class` and `today` aliases. Use **Schedule** to add or edit events, **Zones** for clocks, and **Data** for import/export. Click controls or use the keyboard; **H** opens help.
 
-In event forms, type directly into fields, use arrows or Tab to move, and toggle repeat days with Space. **Apply to** opens the one-date, future-date and entire-series choices; a summary shows the affected dates. Weekly presets select weekdays or daily personal events. **Ctrl+S** saves; **Esc** cancels. In **To-do**, choose **Plan tasks** (P) to reschedule a task, change its category or bring earlier unfinished tasks onto the selected date. When saving a changed meeting link, choose all classes with that title or the selected event scope. Personal events have no teacher or meeting-link fields.
+Use **Duplicate as new event** in the editor to make an independent copy. In event forms, type directly into fields, use arrows or Tab to move, and toggle repeat days with Space. **Apply to** opens the one-date, future-date and entire-series choices; a summary shows the affected dates. Weekly presets select weekdays or daily personal events. **Ctrl+S** saves; **Esc** cancels. In **To-do**, choose **Plan tasks** (P) to reschedule a task, change its category or bring earlier unfinished tasks onto the selected date. When saving a changed meeting link, choose all classes with that title or the selected event scope. Personal events have no teacher or meeting-link fields.
 
 ## Settings
 
@@ -38,7 +38,7 @@ Open **Settings** or press **Y**. Use arrows for quick adjustments; Enter or a c
 
 **Custom colors:** open **Settings → Colors** (C). Edit hex colors for text, selections, events, tasks, borders, progress, notification icons and widget states. Preview changes, copy a preset with **Base**, undo/redo with **U/Y**, or reset a color with **R**. **Import/Export** shares a theme-only JSON file; **Save** applies it and **Back** discards the draft. Desktop notification backgrounds remain controlled by your notification service.
 
-Reopen the app after changing opacity. Widget changes appear after a short delay.
+Save applies opacity immediately in app-launched Kitty windows. Older windows need one relaunch from the widget or launcher. Other terminals control their own transparency. Widget changes appear after a short delay.
 
 ## Desktop bars
 

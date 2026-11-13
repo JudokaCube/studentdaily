@@ -367,6 +367,7 @@ def apply_event_edit(data, date, event, replacement, scope):
                 raise ValueError("This is a one-off event; choose this occurrence only")
             data["exceptions"].setdefault(stamp, {})[identity] = replacement
         else:
+            series_end = None if any(s.get("until") is None for s in matches) else max(s["until"] for s in matches)
             retained = []
             for series in data["series"]:
                 if series["id"] != identity:
@@ -378,7 +379,7 @@ def apply_event_edit(data, date, event, replacement, scope):
             if replacement is not None:
                 revised = copy.deepcopy(replacement)
                 revised["from"] = stamp if scope == "future" else min(s["from"] for s in matches)
-                revised["until"] = None
+                revised["until"] = series_end
                 revised.setdefault("days", event.get("days", [date.weekday()]))
                 retained.append(revised)
             data["series"] = retained
@@ -496,7 +497,7 @@ def event_form_rows(event, scope, new=False):
     if scope!='once':rows += [('days_preset','Repeat pattern')]+[('day'+str(i),DAYS[i].capitalize()) for i in range(7 if event.get('kind')=='personal' else 5)]
     if event.get('kind','class')=='class':rows += [('teacher','Teacher'),('url','Meeting link')]
     rows += [('save','Save event')]
-    if not new:rows += [('delete','Delete event')]
+    if not new:rows += [('duplicate','Duplicate as new event'),('delete','Delete event')]
     rows += [('cancel','Cancel')]
     return rows
 
@@ -544,9 +545,11 @@ def edit_schedule(initial_date=None):
                 if state & (curses.BUTTON1_PRESSED|curses.BUTTON1_CLICKED):return ('click',y)
             except curses.error:pass
             return None
-        def form(old=None):
+        def form(old=None,template=None):
             new=old is None
-            event=copy.deepcopy(old) if old else {'id':new_id(),'subject':'','kind':'class','start':'09:00','end':default_event_end(),'teacher':'','url':'','days':[date.weekday()]}
+            event=copy.deepcopy(old or template) if old or template else {'id':new_id(),'subject':'','kind':'class','start':'09:00','end':default_event_end(),'teacher':'','url':'','days':[date.weekday()]}
+            if template is not None:
+                event['id']=new_id();event['days']=[date.weekday()];event.pop('from',None);event.pop('until',None)
             event.setdefault('kind','class')
             stamp=date.isoformat();scope='once';focus=0;scroll=0;notice='';confirm=False;replace=True
             repeat=any(s['id']==event['id'] for s in DATA['series'])
@@ -568,7 +571,7 @@ def edit_schedule(initial_date=None):
                     elif field=='scope':value={'once':'This date only','new':'Weekly','future':'This and following','all':'All occurrences'}[scope]
                     elif field=='days_preset':value='Choose weekdays / daily / custom'
                     elif field.startswith('day'):value='[x]' if int(field[3:]) in event['days'] else '[ ]'
-                    elif field in ('save','delete','cancel'):value=''
+                    elif field in ('save','delete','duplicate','cancel'):value=''
                     else:value=event.get(field,'') or '—'
                     put(4+j-scroll,('› ' if focus==j else '  ')+label+('  '+value if value else ''),curses.color_pair(2) if focus==j else curses.color_pair(4) if event['kind']=='personal' else 0)
                 summary=('Only '+stamp+' changes; other dates stay unchanged.' if scope=='once' else
@@ -612,6 +615,7 @@ def edit_schedule(initial_date=None):
                     confirm=False
                 elif field.startswith('day') and activate:
                     day=int(field[3:]);event['days']=sorted(set(event['days'])^{day});confirm=False
+                elif field=='duplicate' and activate:return form(template=event)
                 elif field=='cancel' and activate:return
                 elif field in ('save','delete') and activate:
                     if field=='delete':
@@ -962,7 +966,8 @@ def load_theme():
     global BASE_STYLE
     palette=nord_theme.palette()
     bg=palette['background']
-    BASE_STYLE="\033[48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+"m\033["+_fg(palette['text'])+"m"
+    BASE_STYLE="\033[49m\033["+_fg(palette['text'])+"m"
+    if UI_ACTIVE:nord_theme.terminal_palette(palette)
     colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette.get('active',palette['green']),nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text'])))
     for name, color in colors.items():
         globals()[name] = _fg(color)
@@ -1349,7 +1354,7 @@ def build_output(positional, at):
 def pin(interval):
     term = os.environ.get("TERMINAL", "")
     options = [
-        ("kitty", ["kitty", "--class", "classes", "--title", "StudentDaily", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
+        ("kitty", ["kitty", *nord_theme.kitty_launch_options(), "--class", "classes", "--title", "StudentDaily", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
         ("foot", ["foot", "--app-id=class-watch", "--window-size-chars=90x20", SELF, "menu"]),
     ]
     chosen = None
@@ -2106,6 +2111,7 @@ def task_summary(date):
     return panel("YOUR DAY",lines).splitlines()
 
 
+@nord_theme.terminal_session()
 def dashboard():
     global UI_ACTIVE
     UI_ACTIVE = True
