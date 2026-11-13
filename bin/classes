@@ -2235,7 +2235,7 @@ def dashboard_footer(view,cols,events=None,tasks=None,selected=-1,date=None):
 def more_menu():
     return choose_menu('STUDENTDAILY / MORE',[
         ('r','Teachers'),('i','Timezones'),('f','Search'),('s','Import / export'),('y','Settings'),
-        ('e','Edit schedule'),('g','Go to date'),('t','Timer'),('c','Class countdown'),('o','Clock')],
+        ('!','Check for app updates'),('e','Edit schedule'),('g','Go to date'),('t','Timer'),('c','Class countdown'),('o','Clock')],
         'Arrows or mouse to choose · Enter open · Esc back')
 
 
@@ -2414,10 +2414,12 @@ def dashboard():
             elif key in ("w","u","r","h","?","n","l","b"):
                 view = {"w":"week","u":"tasks","r":"teachers","h":"help","?":"help","n":"now","l":"left","b":"free"}[key]
                 selected=-1
-            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","[","+"):
+            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","[","+","!"):
                 sys.stdout.write(MOUSE_OFF+"\033[2J\033[H\033[?25h"+BASE_STYLE)
                 try:
-                    if key=="[":
+                    if key=="!":
+                        if nord_theme.check_app_updates(SELF):pin(1);break
+                    elif key=="[":
                         profiles_menu();selected=-1;query=""
                     elif key=="s":
                         data_menu()
@@ -2462,7 +2464,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key in ("y","e","i","s","a","x","v","[","+"):sys.stdout.write("\033[?1049h")
+                if key in ("y","e","i","s","a","x","v","[","+","!"):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass

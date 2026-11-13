@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.7'
+VERSION = '0.1.8'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -674,3 +674,238 @@ def custom_editor(win,base=None):
     path=color_prompt(curses,win,'EXPORT THEME / JSON PATH',str(Path.home()/'Downloads/studentdaily-theme.json'))
     if path:export_theme(path,draft);notice='Theme exported. No schedule or personal data included.'
   except (ValueError,OSError,TypeError) as exc:notice='Error: '+str(exc)
+
+# App releases are separate from operating-system package updates.
+def release_version(value):
+ import re
+ match=re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)',str(value))
+ if not match:raise ValueError('Unsupported release version')
+ return tuple(map(int,match.groups()))
+
+
+def release_download(url,limit):
+ from urllib.request import Request,urlopen
+ from urllib.error import HTTPError,URLError
+ try:
+  with urlopen(Request(url,headers={'User-Agent':APP_NAME+' updater','Accept':'application/vnd.github+json' if '/api.github.com/' in url else 'application/octet-stream'}),timeout=20) as response:
+   data=response.read(limit+1)
+  if len(data)>limit:raise ValueError('Release download exceeds the size limit')
+  return data
+ except HTTPError as exc:
+  if exc.code in (403,429):raise ValueError('GitHub rate limit reached. Try again later.') from exc
+  if exc.code==404:raise ValueError('No published release is available yet.') from exc
+  raise ValueError('GitHub returned HTTP '+str(exc.code)) from exc
+ except (URLError,TimeoutError) as exc:raise ValueError('Could not reach GitHub. Check your connection and try again.') from exc
+
+
+def latest_app_release():
+ app=APP_NAME.lower();repo='JudokaCube/'+app
+ data=json.loads(release_download('https://api.github.com/repos/'+repo+'/releases/latest',2*1024*1024))
+ if not isinstance(data,dict) or data.get('draft') or data.get('prerelease'):raise ValueError('No stable release is available')
+ tag=data.get('tag_name','');version=release_version(tag)
+ if version<=release_version(VERSION):return None
+ filename=app+'-installer-'+'.'.join(map(str,version))+'.tar.gz'
+ base='https://github.com/'+repo+'/releases/download/'+tag+'/'
+ assets={item.get('name'):item.get('browser_download_url') for item in data.get('assets',[]) if isinstance(item,dict)}
+ for name in (filename,'SHA256SUMS'):
+  if assets.get(name)!=base+name:raise ValueError('Release is missing its verified installer download')
+ body=data.get('body') or 'No release notes were provided.'
+ if not isinstance(body,str):raise ValueError('Invalid release notes')
+ # Display text only, never terminal escape sequences from remote notes.
+ body=''.join(c for c in body if c in '\n\t' or c.isprintable())[:30000]
+ return {'version':'.'.join(map(str,version)),'notes':body,'filename':filename,'archive':assets[filename],'checksums':assets['SHA256SUMS']}
+
+
+def app_update_method(executable):
+ import shutil,subprocess
+ app=APP_NAME.lower();path=Path(executable).resolve()
+ command='classes' if APP=='classes' else 'system-update'
+ if path==Path.home()/'.local/bin'/command:
+  return {'kind':'local','description':'Update this app and installed widget code. Calendars, settings and bar layout stay unchanged.'}
+ if shutil.which('pacman'):
+  try:
+   result=subprocess.run(['pacman','-Qqo',str(path)],capture_output=True,text=True,timeout=5)
+   if result.returncode==0 and result.stdout.strip()==app:
+    helper=next((shutil.which(name) for name in ('paru','yay') if shutil.which(name)),None)
+    if helper:return {'kind':'package','command':[helper,'-Syu','--noconfirm',app], 'description':'Package-managed install: '+Path(helper).name+' will perform a full system upgrade, including this app. Your password may be requested. The new app version must also be available in your package sources.'}
+    return {'kind':'manual','description':'This app is package-managed. Update it with your package manager; install yay or paru to launch that upgrade here.'}
+  except (OSError,subprocess.TimeoutExpired):pass
+ return {'kind':'manual','description':'This is a source checkout or custom install. Update it from its original source; the app will not overwrite development files.'}
+
+
+def app_release_payload(release):
+ import io,tarfile,hashlib,ast,re
+ expected=None
+ for line in release_download(release['checksums'],1024*1024).decode().splitlines():
+  parts=line.split()
+  if len(parts)==2 and parts[1].lstrip('*')==release['filename']:
+   if not re.fullmatch(r'[a-fA-F0-9]{64}',parts[0]):raise ValueError('Invalid release checksum')
+   expected=parts[0].lower()
+ if expected is None:raise ValueError('Installer checksum is missing')
+ blob=release_download(release['archive'],64*1024*1024)
+ if hashlib.sha256(blob).hexdigest()!=expected:raise ValueError('Checksum mismatch. Nothing was installed.')
+ files={};total=0
+ with tarfile.open(fileobj=io.BytesIO(blob),mode='r:gz') as archive:
+  for member in archive:
+   parts=Path(member.name).parts
+   if not parts or member.name.startswith('/') or '..' in parts or member.issym() or member.islnk():raise ValueError('Unsafe installer archive')
+   if member.isdir():continue
+   if not member.isfile():raise ValueError('Unsupported installer archive entry')
+   total+=member.size
+   if total>128*1024*1024:raise ValueError('Unpacked release is too large')
+   name='/'.join(parts[1:])
+   if not name or name in files:raise ValueError('Invalid installer archive layout')
+   files[name]=archive.extractfile(member).read()
+ app=APP_NAME.lower();command='classes' if APP=='classes' else 'system-update'
+ for name in ('bin/'+command,'bin/'+app+'_ui.py'):
+  if name not in files:raise ValueError('Installer is missing app files')
+  ast.parse(files[name].decode())
+ values={}
+ for node in ast.parse(files['bin/'+app+'_ui.py'].decode()).body:
+  if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name) and node.targets[0].id in ('VERSION','APP_NAME'):
+   values[node.targets[0].id]=ast.literal_eval(node.value)
+ if values.get('VERSION')!=release['version'] or values.get('APP_NAME')!=APP_NAME:raise ValueError('Installer app/version does not match this release')
+ return files
+
+
+def install_local_app_release(release,executable):
+ import fcntl,stat
+ if app_update_method(executable)['kind']!='local':raise ValueError('This installation must be updated through its original installer or package manager')
+ app=APP_NAME.lower();command='classes' if APP=='classes' else 'system-update'
+ cache=Path(os.environ.get('XDG_CACHE_HOME',Path.home()/'.cache'))/app;cache.mkdir(parents=True,exist_ok=True)
+ with (cache/'app-update.lock').open('a') as lock:
+  try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  except BlockingIOError:raise ValueError('An app update is already running')
+  files=app_release_payload(release)
+  config=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))
+  data=Path(os.environ.get('XDG_DATA_HOME',Path.home()/'.local/share'))
+  targets=[(Path(executable).resolve(),files['bin/'+command],0o755),(Path(executable).resolve().parent/(app+'_ui.py'),files['bin/'+app+'_ui.py'],0o644)]
+  plugin=data/'noctalia-plugins'/APP
+  if plugin.is_dir():
+   for name in ('plugin.toml','bar.luau'):
+    key='plugins/'+APP+'/'+name
+    if key in files:targets.append((plugin/name,files[key],0o644))
+  units=['classes-reminders.service'] if APP=='classes' else ['system-update-check.service','system-update-check.timer']
+  for name in units:
+   path=config/'systemd/user'/name
+   if path.exists() and 'services/'+name in files:targets.append((path,files['services/'+name],0o644))
+  # Setup records an optional copied Caelestia component, without changing Bar.qml.
+  manifest=data/app/'installation.json';info={}
+  if manifest.exists():
+   info=json.loads(manifest.read_text())
+   if not isinstance(info,dict):raise ValueError('Invalid installation record')
+   value=info.get('caelestia_widget')
+   if value:
+    path=Path(value);key='integrations/caelestia/'+APP_NAME+'Widget.qml'
+    if path.name!=APP_NAME+'Widget.qml' or path.parent.name!=app:raise ValueError('Invalid installed widget location')
+    if path.is_file() and key in files:targets.append((path,files[key],0o644))
+  info.update(method='local',version=release['version'])
+  targets.append((manifest,(json.dumps(info,indent=2)+'\n').encode(),0o600))
+  originals=[]
+  for path,content,mode in targets:
+   if path.is_symlink():raise ValueError('Refusing to replace a symlink: '+str(path))
+   originals.append((path,path.read_bytes() if path.exists() else None,stat.S_IMODE(path.stat().st_mode) if path.exists() else mode))
+  try:
+   for path,content,mode in targets:
+    _write_bytes(path,content);path.chmod(mode)
+  except BaseException:
+   for path,content,mode in originals:
+    if content is None:path.unlink(missing_ok=True)
+    else:_write_bytes(path,content);path.chmod(mode)
+   raise
+ return 'Installed '+release['version']+'. Restart the app to load it.'
+
+
+def app_update_dialog(title,body,choices):
+ """Scrollable release notes with visible, mouse-accessible Yes/No controls."""
+ import curses,textwrap
+ def screen(win):
+  curses.curs_set(0);win.keypad(True);curses.start_color();curses.use_default_colors();curses.mousemask(curses.ALL_MOUSE_EVENTS)
+  offset=0;selected=0
+  while True:
+   curses_colors(curses,win);win.erase();h,w=win.getmaxyx();menu_frame(curses,win)
+   def put(y,x,text,style=0):
+    if 0<=y<h-1:
+     try:win.addnstr(y,x,text,max(0,w-x-2),style)
+     except curses.error:pass
+   if h<12 or w<40:
+    put(1,1,'Enlarge window; Esc cancels.');win.refresh()
+    if win.getch() in (27,ord('q')):return None
+    continue
+   put(1,2,title,curses.color_pair(1)|curses.A_BOLD)
+   lines=[line for part in body.splitlines() for line in (textwrap.wrap(part,max(1,w-6)) or [''])]
+   visible=h-8;offset=min(max(0,offset),max(0,len(lines)-visible))
+   for i,line in enumerate(lines[offset:offset+visible]):put(3+i,3,line)
+   put(h-4,2,'↑↓ Scroll · Tab/←→ Choose · Enter Select · Esc Cancel',curses.color_pair(5))
+   labels=['[ '+label+' ]' for _,label in choices];left=max(2,(w-sum(map(len,labels))-2*(len(labels)-1))//2);hits=[]
+   for i,label in enumerate(labels):
+    put(h-2,left,label,curses.color_pair(2 if i==selected else 1));hits.append((left,left+len(label),i));left+=len(label)+2
+   win.refresh();key=win.getch()
+   if key in (27,ord('q'),3):return None
+   if key in (10,13):return choices[selected][0]
+   if key in (9,curses.KEY_RIGHT,curses.KEY_LEFT):selected=(selected+(-1 if key==curses.KEY_LEFT else 1))%len(choices)
+   elif key in (curses.KEY_DOWN,ord('j')):offset+=1
+   elif key in (curses.KEY_UP,ord('k')):offset-=1
+   elif key in (curses.KEY_NPAGE,curses.KEY_PPAGE):offset+=visible if key==curses.KEY_NPAGE else -visible
+   elif key==curses.KEY_MOUSE:
+    try:_,x,y,_,state=curses.getmouse()
+    except curses.error:continue
+    if state & curses.BUTTON4_PRESSED:offset-=3
+    elif state & getattr(curses,'BUTTON5_PRESSED',0):offset+=3
+    elif y==h-2 and state & (curses.BUTTON1_CLICKED|curses.BUTTON1_PRESSED):
+     for start,end,i in hits:
+      if start<=x<end:return choices[i][0]
+ return run_screen(screen)
+
+
+def app_update_wait(title,operation):
+ import curses,threading,queue
+ results=queue.Queue()
+ def worker():
+  try:results.put((True,operation()))
+  except Exception as exc:results.put((False,exc))
+ threading.Thread(target=worker,daemon=True).start()
+ def screen(win):
+  curses.raw();curses.curs_set(0);win.timeout(150);win.keypad(True);curses.start_color();curses.use_default_colors();tick=0
+  while True:
+   try:return results.get_nowait()
+   except queue.Empty:pass
+   curses_colors(curses,win);win.erase();h,w=win.getmaxyx();menu_frame(curses,win)
+   for y,text in ((2,title),(4,'Please wait'+'.'*(tick%4)),(6,'Downloads have a timeout. App updates never run in the background.')):
+    if y<h-1:
+     try:win.addnstr(y,2,text,max(0,w-4),curses.color_pair(1))
+     except curses.error:pass
+   win.refresh();win.getch();tick+=1
+ ok,result=run_screen(screen)
+ if not ok:raise ValueError(str(result)) from result
+ return result
+
+
+def check_app_updates(executable):
+ import sys,subprocess
+ if not sys.stdin.isatty() or not sys.stdout.isatty():
+  print('Open Check for app updates in an interactive terminal.');return False
+ try:
+  release=app_update_wait('CHECKING '+APP_NAME.upper(),latest_app_release)
+  if release is None:
+   app_update_dialog(APP_NAME+' '+VERSION,'You already have the latest stable release.',[('back','Back')]);return False
+  method=app_update_method(executable)
+  body='Installed: '+VERSION+'   Available: '+release['version']+'\n\n'+method['description']+'\n\nWHAT’S NEW\n'+release['notes']
+  choices=[('no','No, not now'),('yes','Yes, install')] if method['kind']!='manual' else [('no','Back')]
+  if app_update_dialog('UPDATE '+APP_NAME.upper(),body,choices)!='yes':return False
+  if method['kind']=='local':
+   message=app_update_wait('INSTALLING '+APP_NAME.upper(),lambda:install_local_app_release(release,executable))
+   try:
+    result=subprocess.run(['systemctl','--user','daemon-reload'],capture_output=True,timeout=15)
+    if result.returncode:message+=' Background services may need a session restart.'
+    if APP=='classes':subprocess.run(['systemctl','--user','try-restart','classes-reminders.service'],capture_output=True,timeout=15)
+    reload_widgets()
+   except (OSError,subprocess.TimeoutExpired):message+=' Restart your desktop session to reload background services and widgets.'
+   if preferences().get('bar')=='caelestia':message+=' Restart Caelestia to load updated widget code.'
+  else:
+   result=subprocess.run(method['command'])
+   if result.returncode:raise ValueError('Package manager did not finish successfully. Your installed files remain package-managed.')
+   message='Package upgrade finished. If this release is not yet packaged, your package manager may have kept the previous version.'
+  return app_update_dialog('APP UPDATE COMPLETE',message,[('later','Later'),('restart','Restart app')])=='restart'
+ except (OSError,ValueError,KeyError,TypeError,subprocess.TimeoutExpired) as exc:
+  app_update_dialog('APP UPDATE FAILED',str(exc),[('back','Back')]);return False

@@ -29,6 +29,10 @@ Run `studentdaily`. Local installs also provide `classes`, with optional `class`
 
 Use **Duplicate as new event** in the editor to make an independent copy. In event forms, type directly into fields, use arrows or Tab to move, and toggle repeat days with Space. **Apply to** opens the one-date, future-date and entire-series choices; a summary shows the affected dates. Weekly presets select weekdays or daily personal events. **Ctrl+S** saves; **Esc** cancels. In **To-do**, choose **Plan tasks** (P) to reschedule a task, change its category or bring earlier unfinished tasks onto the selected date. When saving a changed meeting link, choose all classes with that title or the selected event scope. Personal events have no teacher or meeting-link fields.
 
+## App updates
+
+Choose **Check for app updates** under **More**. Review the release notes, then choose **Yes, install** or **No, not now**. Local installs verify the release checksum and update app/widget code without resetting data or settings. Package-managed installs use yay/paru for a full system upgrade; source checkouts are never overwritten. The new release may reach package sources later than GitHub. Updates are checked only when requested.
+
 ## Settings
 
 Open **More → Settings** or press **Y**. Use arrows for quick adjustments; Enter or a click opens choices. **Save / Ctrl+S** applies changes; **Esc** discards unsaved changes.

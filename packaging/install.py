@@ -172,6 +172,10 @@ def main():
         for unit in units:subprocess.run(['systemctl','--user','restart',unit],check=True)
         if has_packages and not args.no_checks:subprocess.run(['systemctl','--user','start','--no-block','system-update-check.service'])
         for component in selected_components:ui_modules[component].reload_widgets()
+    for component in selected_components:
+        module=ui_modules[component];receipt={'method':'local','version':module.VERSION}
+        if args.bar=='caelestia':receipt['caelestia_widget']=str(args.caelestia_root.expanduser().resolve()/'modules/bar'/module.APP_NAME.lower()/(module.APP_NAME+'Widget.qml'))
+        module._write_json(DATA/module.APP_NAME.lower()/'installation.json',receipt)
     print('Installed. Open a new terminal for aliases. No keybindings were changed.')
     if has_classes and setup=='customize':
         subprocess.run([str(HOME/'.local/bin/classes'),'timezones'])
