@@ -25,13 +25,13 @@ This installer includes only StudentDaily and its widgets. Choose a bar, theme a
 
 ## Usage
 
-Run `studentdaily`. Local installs also provide `classes`, with optional `class` and `today` aliases. Use **Schedule** to add or edit events, **Zones** for clocks, and **Data** for import/export. Click controls or use the keyboard; **H** opens help. **Calendars** (`[`) creates, switches, renames and imports independent profiles. Your existing calendar stays under My calendar. Each has its own events, teachers, links, tasks, timezones, theme and settings. Export the selected calendar to share it, including its meeting links. The widget and reminders follow the selected profile; other calendars stay saved but do not send reminders. Disable reminders in Settings when viewing someone else’s calendar.
+Run `studentdaily`. Local installs also provide `classes`, with optional `class` and `today` aliases. Navigate with **Today**, **Week**, **Tasks**, **Calendars** and **More**. The footer shows relevant actions; **More** contains Teachers, Timezones, Search, Import/export and Settings. Existing keyboard shortcuts still work; Tab selects an event or task. Click controls or use the keyboard; **H** opens help. **Calendars** (`[`) creates, switches, renames and imports independent profiles. Your existing calendar stays under My calendar. Each has its own events, teachers, links, tasks, timezones, theme and settings. Export the selected calendar to share it, including its meeting links. The widget and reminders follow the selected profile; other calendars stay saved but do not send reminders. Disable reminders in Settings when viewing someone else’s calendar.
 
 Use **Duplicate as new event** in the editor to make an independent copy. In event forms, type directly into fields, use arrows or Tab to move, and toggle repeat days with Space. **Apply to** opens the one-date, future-date and entire-series choices; a summary shows the affected dates. Weekly presets select weekdays or daily personal events. **Ctrl+S** saves; **Esc** cancels. In **To-do**, choose **Plan tasks** (P) to reschedule a task, change its category or bring earlier unfinished tasks onto the selected date. When saving a changed meeting link, choose all classes with that title or the selected event scope. Personal events have no teacher or meeting-link fields.
 
 ## Settings
 
-Open **Settings** or press **Y**. Use arrows for quick adjustments; Enter or a click opens choices. **Save / Ctrl+S** applies changes; **Esc** discards unsaved changes.
+Open **More → Settings** or press **Y**. Use arrows for quick adjustments; Enter or a click opens choices. **Save / Ctrl+S** applies changes; **Esc** discards unsaved changes.
 
 - StudentDaily: 12/24-hour clocks, clock seconds, week numbers, teacher details, default event length, reminders, progress, weekends and task summary.
 - Appearance: theme, opacity, borders, widget visibility and text. Noctalia also supports animation controls.

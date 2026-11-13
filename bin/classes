@@ -540,7 +540,7 @@ def commit_event(data, date, old, event, scope, new=False, delete=False):
     return apply_event_edit(data,date,old,None if delete else event,scope)
 
 
-def edit_schedule(initial_date=None):
+def edit_schedule(initial_date=None, add_new=False):
     """Mouse/keyboard editor with one form and explicit save, no prompt chain."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return edit_schedule_text(initial_date)
@@ -667,6 +667,11 @@ def edit_schedule(initial_date=None):
                     if field=='date':stamp=value
                     else:event[field]=value
                     notice='';confirm=False
+        if add_new:
+            load_config()
+            baseline=Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b''
+            form()
+            return
         while True:
             load_config()
             baseline=Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b''
@@ -2052,10 +2057,6 @@ def task_panel(date, selected=-1):
             marker = "▸" if index == selected else " "
             content.append(c(_fg(nord_theme.role_color("task_done" if task["done"] else "task","dim" if task["done"] else "text")), f"{marker} {box} {task['text']}"))
         content.append("")
-    targets[1+len(content)] = ("task_controls", None)
-    targets[2+len(content)] = ("task_date", None)
-    content.extend([c(DIM, "A Add task   Enter/Click Toggle   V Edit   X Delete"),
-                    c(DIM, "G Choose date   P Plan tasks   Tab Select task")])
     return panel("TO-DO / " + date.strftime("%a %d %b").upper(), content).splitlines(), targets, ordered
 
 
@@ -2112,6 +2113,8 @@ Z Join current/next (or selected) class · M Finish/undo today
 T Timer     C Class countdown               O Clock
 N Now       L Classes left                 B Breaks
 I Timezones   S Import/export   Y Settings   [ Calendars
+. More tools   + Add event
+Tab selects an event or task; footer actions apply to that selection.
 P Separate window      H Help              Q Quit
 
 EDITING
@@ -2153,22 +2156,22 @@ def button_row(items, active=None):
     return line,hits
 
 
-def wrapped_buttons(items, width, active=None):
+def wrapped_buttons(items, width, active=None, shortcuts=True):
     # Compact buttons, centered independently; click coordinates follow the padding.
     rows=[];maps={};group=[];used=0
     def finish(group):
-        texts=[f"{key.upper()} {label}" for key,label in group]
+        texts=[f"{key.upper()} {label}" if shortcuts else label for key,label in group]
         length=sum(map(len,texts))+2*(len(texts)-1)
         padding=2+max(0,(width-length)//2)
         line=" "*padding;hits=[];column=padding+1
         palette=nord_theme.palette();bg=palette.get('selection_background',palette['surface'])
         selected="48;2;"+';'.join(str(int(bg[i:i+2],16)) for i in (0,2,4))+";"+_fg(palette.get('selection_text',palette['accent']))
         for (key,label),text in zip(group,texts):
-            line+=c(selected if key==active else ACCENT,text)+"  "
+            line+=c(selected if key==active else DIM,text)+"  "
             hits.append((column,column+len(text)-1,key));column+=len(text)+2
         maps[len(rows)]=hits;rows.append(line.rstrip())
     for key,label in items:
-        size=len(key)+len(label)+1
+        size=len(label)+(len(key)+1 if shortcuts else 0)
         if group and used+2+size>width:
             finish(group);group=[];used=0
         used+=size+(2 if group else 0);group.append((key,label))
@@ -2187,25 +2190,46 @@ def dashboard_header(now,date,view,cols,notice):
     else:
         rows=["  "+c(TEXT,line) for line in textwrap.wrap(left,width=width)]+["  "+c(DIM,line) for line in textwrap.wrap(clocks,width=width)]
     rows.append("  "+c(DIM,"─"*width));hits={}
-    active={"day":"d","week":"w","tasks":"u","teachers":"r"}.get(view)
-    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Settings"),("[","Calendars")],active),
-                         ([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[("g","Date")],str(date.weekday()+1) if view=="day" and date.weekday()<5 else None)]:
-        buttons,maps=wrapped_buttons(items,width,chosen)
+    active={"day":"d","week":"w","tasks":"u"}.get(view,'.')
+    groups=[([('d','Today'),('w','Week'),('u','Tasks'),('[','Calendars'),('.','More')],active)]
+    if view=='week':groups.append(([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[('g','Date')],None))
+    for items,chosen in groups:
+        buttons,maps=wrapped_buttons(items,width,chosen,shortcuts=False)
         hits.update({len(rows)+i:v for i,v in maps.items()});rows.extend(buttons)
     status=widget_status(now)
     rows += ["  "+c(NOW if notice else _fg(status["textColor"]),notice or status["text"]),""]
     return rows,hits
 
 
-def dashboard_footer(view,cols):
-    width=max(16,min(94,cols-4))
-    actions=[("a","Add task"),("enter","Done"),("v","Edit"),("x","Delete"),("g","Date"),("p","Plan tasks")] if view=="tasks" else [("z","Join"),("t","Timer"),("c","Countdown"),("o","Clock"),("a","Add task"),("m","Finish")]
-    rows=["  "+c(DIM,"─"*width)];hits={}
-    for items in (actions+[("h","Help"),("q","Quit")],):
-        buttons,maps=wrapped_buttons(items,width)
-        hits.update({len(rows)+i:[(a,b,"\r" if k=="enter" else k) for a,b,k in values] for i,values in maps.items()})
-        rows.extend(buttons)
+def dashboard_footer(view,cols,events=None,tasks=None,selected=-1,date=None):
+    width=max(16,min(94,cols-4));events=events or [];tasks=tasks or []
+    actions=[]
+    if view=='tasks':
+        actions=[('a','Add task'),('p','Plan tasks')]
+        if tasks:
+            task=tasks[max(0,selected)%len(tasks)]
+            actions += [('enter','Undo' if task['done'] else 'Done'),('v','Edit'),('x','Delete')]
+        actions.append(('g','Date'))
+    elif view=='day':
+        actions=[('+','Add event'),('e','Edit schedule')]
+        if events:
+            event=events[selected if 0<=selected<len(events) else default_event_index(events)]
+            if event.get('url') and event.get('kind')!='personal':actions.append(('z','Join'))
+            if date==datetime.now().date() and hm(event['start'])*60<=now_seconds(None):
+                actions.append(('m','Undo finish' if event_finished(event,date,load_completed()) else 'Finish'))
+    elif view=='week':actions=[('+','Add event'),('e','Edit schedule')]
+    rows=['  '+c(DIM,'─'*width)];hits={}
+    buttons,maps=wrapped_buttons(actions+[('h','Help'),('q','Quit')],width,shortcuts=False)
+    hits.update({len(rows)+i:[(a,b,'\r' if k=='enter' else k) for a,b,k in values] for i,values in maps.items()})
+    rows.extend(buttons)
     return rows,hits
+
+
+def more_menu():
+    return choose_menu('STUDENTDAILY / MORE',[
+        ('r','Teachers'),('i','Timezones'),('f','Search'),('s','Import / export'),('y','Settings'),
+        ('e','Edit schedule'),('g','Go to date'),('t','Timer'),('c','Class countdown'),('o','Clock')],
+        'Arrows or mouse to choose · Enter open · Esc back')
 
 
 def hit_key(hits,x):
@@ -2220,7 +2244,7 @@ def task_summary(date):
         done=sum(t["done"] for t in items)
         next_task=next((t["text"] for t in items if not t["done"]),"All clear" if items else "No tasks yet")
         lines.append(c(ACCENT,f"{category:<9}")+c(DIM,f"{done}/{len(items)} done   ")+c(TEXT,next_task))
-    lines.append(c(DIM,"Click to open your to-do list · A to add a task"))
+    lines.append(c(DIM,"Click to open tasks"))
     return panel("YOUR DAY",lines).splitlines()
 
 
@@ -2271,7 +2295,7 @@ def dashboard():
             inset=max(0,(cols-98)//2)
             canvas_cols=min(cols,98)
             header,header_hits=dashboard_header(now,date,view,canvas_cols,notice)
-            footer,footer_hits=dashboard_footer(view,canvas_cols)
+            footer,footer_hits=dashboard_footer(view,canvas_cols,events,tasks,selected,date)
             if cols<36 or rows<len(header)+len(footer)+4:
                 sys.stdout.write("\033[H\033[2J"+clip_ansi("Window too small: enlarge it (Q quits).",max(1,cols-1)))
                 sys.stdout.flush()
@@ -2330,6 +2354,12 @@ def dashboard():
                     else:
                         continue
             key = key.lower() if len(key)==1 else key
+            if key=='.':
+                sys.stdout.write(MOUSE_OFF+'\033[2J\033[H\033[?25h')
+                try:key=more_menu()
+                except (KeyboardInterrupt,EOFError):key=None
+                finally:sys.stdout.write('\033[?1049h\033[?25l\033[2J\033[H'+BASE_STYLE+MOUSE_ON)
+                if key is None:continue
             if key=="q":
                 break
             if key in (KEY_DOWN,"j","\x1b[6~"):
@@ -2375,7 +2405,7 @@ def dashboard():
             elif key in ("w","u","r","h","?","n","l","b"):
                 view = {"w":"week","u":"tasks","r":"teachers","h":"help","?":"help","n":"now","l":"left","b":"free"}[key]
                 selected=-1
-            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","["):
+            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","[","+"):
                 sys.stdout.write(MOUSE_OFF+"\033[2J\033[H\033[?25h"+BASE_STYLE)
                 try:
                     if key=="[":
@@ -2387,8 +2417,8 @@ def dashboard():
                         load_theme()
                     elif key=="i":
                         edit_timezones()
-                    elif key=="e":
-                        edit_schedule(date)
+                    elif key in ("e","+"):
+                        edit_schedule(date,add_new=key=="+")
                     elif key=="g":
                         value=input("Date YYYY-MM-DD (Enter = today): ").strip()
                         date=valid_date(value) if value else now.date()
@@ -2423,7 +2453,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key in ("y","e","i","s","a","x","v","["):sys.stdout.write("\033[?1049h")
+                if key in ("y","e","i","s","a","x","v","[","+"):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass
