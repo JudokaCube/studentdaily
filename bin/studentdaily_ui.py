@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.4'
+VERSION = '0.1.5'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -17,6 +17,48 @@ THEMES={
  'High Contrast':('000000','ffffff','00ffff','ff88ff','dddddd','333333','00ff00','ff7777'),
 }
 SETTINGS=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))/'classes/appearance.json'
+
+# The default profile retains legacy paths; additional calendars are isolated.
+PROFILE_ROOT=SETTINGS.parent
+
+def profile_registry():
+ path=PROFILE_ROOT/'profiles.json'
+ try:data=json.loads(path.read_text())
+ except FileNotFoundError:return {'active':'default','profiles':{'default':'My calendar'}}
+ if not isinstance(data,dict) or not isinstance(data.get('profiles'),dict):raise ValueError('Invalid calendar registry')
+ import re
+ for identity,name in data['profiles'].items():
+  if identity!='default' and not re.fullmatch(r'[a-f0-9]{32}',identity):raise ValueError('Invalid calendar ID')
+  validate_profile_name(name)
+ if 'default' not in data['profiles'] or data.get('active') not in data['profiles']:raise ValueError('Missing active calendar')
+ return data
+
+def validate_profile_name(name):
+ if not isinstance(name,str) or not name.strip() or len(name)>60 or any(not c.isprintable() for c in name):raise ValueError('Use a calendar name of 1–60 printable characters')
+ return name.strip()
+
+def profile_directory(identity):
+ if identity!='default':
+  import re
+  if not re.fullmatch(r'[a-f0-9]{32}',identity):raise ValueError('Invalid calendar ID')
+ return PROFILE_ROOT if identity=='default' else PROFILE_ROOT/'profiles'/identity
+
+PROFILE_ID=profile_registry()['active']
+SETTINGS=profile_directory(PROFILE_ID)/'appearance.json'
+
+def activate_profile(identity):
+ global PROFILE_ID,SETTINGS
+ if identity not in profile_registry()['profiles']:raise ValueError('Calendar no longer exists')
+ PROFILE_ID=identity;SETTINGS=profile_directory(identity)/'appearance.json'
+ _OPTIONS_CACHE.clear();_THEME_CACHE.clear()
+
+def edit_profile_registry(change):
+ import fcntl
+ PROFILE_ROOT.mkdir(parents=True,exist_ok=True)
+ with (PROFILE_ROOT/'profiles.lock').open('a') as lock:
+  fcntl.flock(lock,fcntl.LOCK_EX)
+  data=profile_registry();change(data);_write_json(PROFILE_ROOT/'profiles.json',data)
+
 
 CORE_ROLES=('background','text','accent','purple','dim','surface','green','red')
 ROLE_LABELS={
@@ -441,7 +483,7 @@ def save_options(app,values):
   unit=config/'systemd/user/classes-reminders.service'
   if not unit.exists() and not (Path('/usr/lib/systemd/user')/unit.name).exists():return 'Settings saved. Install StudentDaily’s background service to apply scheduling.'
   try:
-   commands=[['systemctl','--user','daemon-reload'],['systemctl','--user','enable' if values['reminders'] else 'disable','--now',unit.name]]
+   commands=[['systemctl','--user','daemon-reload'],['systemctl','--user','enable' if values['reminders'] or len(profile_registry()['profiles'])>1 else 'disable','--now',unit.name]]
    for command in commands:
     result=subprocess.run(command,capture_output=True,text=True,timeout=15)
     if result.returncode:return 'Settings saved; service change failed: '+(result.stderr.strip() or 'systemctl error')[:120]

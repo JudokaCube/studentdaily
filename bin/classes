@@ -58,6 +58,28 @@ TIMEZONE_FILE = os.path.join(os.path.dirname(CONFIG_FILE), 'timezones.json')
 DEFAULT_TIMEZONES = []
 
 
+_LEGACY_PATHS=(CONFIG_FILE,TASK_FILE,TIMEZONE_FILE,STATE_FILE)
+_ACTIVE_PROFILE=None
+DAEMON_LOCK=STATE_FILE+'.lock'
+
+def sync_profile():
+    global CONFIG_FILE,TASK_FILE,TIMEZONE_FILE,STATE_FILE,_ACTIVE_PROFILE
+    identity=nord_theme.profile_registry()['active']
+    if identity==_ACTIVE_PROFILE:return False
+    nord_theme.activate_profile(identity)
+    if identity=='default':CONFIG_FILE,TASK_FILE,TIMEZONE_FILE,STATE_FILE=_LEGACY_PATHS
+    else:
+        directory=nord_theme.profile_directory(identity)
+        CONFIG_FILE,TASK_FILE,TIMEZONE_FILE,STATE_FILE=(str(directory/name) for name in ('schedule.json','tasks.json','timezones.json','notified.json'))
+    _ACTIVE_PROFILE=identity
+    return True
+
+sync_profile()
+
+def profile_name():
+    return nord_theme.profile_registry()['profiles'].get(_ACTIVE_PROFILE,'Calendar')
+
+
 def load_timezones():
     try:
         with open(TIMEZONE_FILE) as f:zones=json.load(f)
@@ -315,7 +337,7 @@ def load_config():
         with open(CONFIG_FILE) as f:
             DATA = validate_config(json.load(f))
     except FileNotFoundError:
-        DATA = copy.deepcopy(DEFAULT_CONFIG)
+        DATA = copy.deepcopy(DEFAULT_CONFIG) if _ACTIVE_PROFILE=='default' else {'version':2,'series':[],'exceptions':{}}
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise ValueError(f"Cannot load schedule: {exc}") from exc
     TEACHERS = {s["subject"]: s.get("teacher", "") for s in DATA["series"] if s.get("kind","class")=="class"}
@@ -816,7 +838,8 @@ def search_all(query):
 def export_bundle(path):
     load_config()
     atomic_json(str(path),{'format':'nord-classes','version':1,'schedule':DATA,
-                         'timezones':load_timezones(),'tasks':load_tasks(),'completed':load_completed(),'theme':nord_theme.current(),
+                         'timezones':load_timezones(),'tasks':load_tasks(),'completed':load_completed(),'theme':nord_theme.current(),'calendar_name':profile_name(),
+                         'settings':nord_theme.options('classes'),
                          **({'custom_theme':nord_theme.custom_theme()} if nord_theme.current()=='Custom' else {})})
 
 
@@ -843,6 +866,13 @@ def validate_bundle(data):
         if not isinstance(keys,list) or any(not isinstance(k,str) for k in keys):raise ValueError('Invalid completion entries')
     if data.get('theme','Nord') not in nord_theme.theme_names():raise ValueError('Unknown theme')
     if data.get('theme')=='Custom':nord_theme.validate_custom(data.get('custom_theme'))
+    if 'calendar_name' in data:nord_theme.validate_profile_name(data['calendar_name'])
+    if 'settings' in data:
+        if not isinstance(data['settings'],dict):raise ValueError('Invalid settings')
+        allowed={key:choices for key,_,choices,_,_ in nord_theme.settings_fields('classes')}
+        for key,value in data['settings'].items():
+            if key not in allowed or not any(type(value)==type(v) and value==v for v,_ in allowed[key]):raise ValueError('Invalid calendar setting: '+key)
+        if data['settings'].get('theme',data.get('theme','Nord'))!=data.get('theme','Nord'):raise ValueError('Conflicting theme settings')
     return data
 
 
@@ -870,6 +900,9 @@ def import_bundle(path,mode='merge'):
         appearance=nord_theme.appearance();appearance['theme']=incoming['theme']
         if incoming['theme']=='Custom':appearance['custom']=nord_theme.validate_custom(incoming['custom_theme'])
         writes[str(nord_theme.SETTINGS)]=appearance
+    if 'settings' in incoming:
+        prefs=dict(nord_theme.preferences());prefs.update({k:v for k,v in incoming['settings'].items() if k!='theme'})
+        writes[str(nord_theme.SETTINGS.parent/'preferences.json')]=prefs
     previous={path:Path(path).read_bytes() if Path(path).exists() else None for path in writes}
     try:
         for path,value in writes.items():atomic_json(path,value)
@@ -879,6 +912,83 @@ def import_bundle(path,mode='merge'):
             else:atomic_json(path,json.loads(content))
         raise
     load_config();load_theme()
+
+
+
+def create_profile(name, bundle=None):
+    import uuid
+    name=nord_theme.validate_profile_name(name)
+    if bundle is not None:validate_bundle(bundle)
+    identity=uuid.uuid4().hex
+    directory=nord_theme.profile_directory(identity)
+    directory.mkdir(parents=True,exist_ok=False,mode=0o700)
+    try:
+        empty={'version':2,'series':[],'exceptions':{}}
+        atomic_json(str(directory/'schedule.json'),bundle['schedule'] if bundle else empty)
+        for file,key,default in [('tasks.json','tasks',{}),('timezones.json','timezones',[]),('completed.json','completed',{})]:
+            atomic_json(str(directory/file),bundle.get(key,default) if bundle else default)
+        appearance={'theme':bundle.get('theme','Nord') if bundle else 'Nord'}
+        if bundle and appearance['theme']=='Custom':appearance['custom']=bundle['custom_theme']
+        atomic_json(str(directory/'appearance.json'),appearance)
+        preferences={k:v for k,v in (bundle or {}).get('settings',{}).items() if k!='theme'}
+        # Desktop integration is installation-wide; inherit its backend only.
+        preferences['bar']=nord_theme.preferences().get('bar','noctalia')
+        atomic_json(str(directory/'preferences.json'),preferences)
+        def add(data):data['profiles'][identity]=name
+        nord_theme.edit_profile_registry(add)
+    except Exception:
+        shutil.rmtree(directory)
+        raise
+    return identity
+
+
+def switch_profile(identity):
+    def change(data):
+        if identity not in data['profiles']:raise ValueError('Calendar no longer exists')
+        data['active']=identity
+    nord_theme.edit_profile_registry(change)
+    sync_profile();load_config();load_theme()
+    nord_theme.apply_opacity(nord_theme.opacity())
+    # Keep the daemon available even when this profile has reminders disabled.
+    try:subprocess.run(['systemctl','--user','enable','--now','classes-reminders.service'],capture_output=True,timeout=5)
+    except (OSError,subprocess.TimeoutExpired):pass
+
+
+def profiles_menu():
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print('Open Calendars in an interactive terminal.');return
+    while True:
+        registry=nord_theme.profile_registry()
+        rows=[(identity,('● ' if identity==_ACTIVE_PROFILE else '○ ')+name,'Current calendar' if identity==_ACTIVE_PROFILE else 'Switch to this calendar') for identity,name in registry['profiles'].items()]
+        rows += [('new','+ New calendar','Start empty with independent settings.'),('import','Import as new calendar','Keep every existing calendar intact.'),('export','Export current calendar','Includes teachers, links, tasks, clocks, theme and settings.'),('rename','Rename current calendar')]
+        choice=choose_menu('CALENDARS / '+profile_name(),rows,'Widget and reminders follow the selected calendar. Use Settings to disable its reminders.',searchable=True)
+        if choice is None:return
+        try:
+            if choice in registry['profiles']:
+                switch_profile(choice);return
+            if choice in ('new','rename'):
+                name=text_dialog('CALENDAR NAME',profile_name() if choice=='rename' else '')
+                if not name:continue
+                name=nord_theme.validate_profile_name(name)
+                if choice=='new':switch_profile(create_profile(name));return
+                identity=_ACTIVE_PROFILE
+                def rename(data):data['profiles'][identity]=name
+                nord_theme.edit_profile_registry(rename)
+            elif choice=='import':
+                value=text_dialog('IMPORT CALENDAR / JSON FILE','','Exports contain private meeting links; only share them with people you trust.')
+                if not value:continue
+                bundle=validate_bundle(json.loads(Path(value).expanduser().read_text()))
+                name=text_dialog('CALENDAR NAME',bundle.get('calendar_name','Imported calendar'))
+                if name:switch_profile(create_profile(name,bundle));return
+            elif choice=='export':
+                value=text_dialog('EXPORT CALENDAR / JSON FILE','~/Downloads/studentdaily-calendar.json','Includes meeting links and other calendar data.')
+                if not value:continue
+                path=Path(value).expanduser()
+                if path.exists() and choose_menu('REPLACE EXPORT?', [('cancel','Cancel'),('replace','Replace this file')])!='replace':continue
+                export_bundle(path)
+                choose_menu('EXPORTED', [('back','Back',str(path))])
+        except (ValueError,OSError,KeyError,TypeError) as exc:
+            choose_menu('CALENDAR ERROR',[('back','Back',str(exc))])
 
 
 def data_menu():
@@ -1099,6 +1209,7 @@ def progress_meter(percent,width=10):
 
 def notify_check(notifier, now=None):
     now = now or datetime.now()
+    sync_profile()
     load_config()
     if not nord_theme.options("classes")["reminders"]:return
     lead=nord_theme.options("classes")["reminder_minutes"]
@@ -1123,8 +1234,8 @@ def reminder_daemon(once=False):
     import dbus.mainloop.glib
     from gi.repository import GLib
     import fcntl
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    lock = open(STATE_FILE + ".lock", "w")
+    os.makedirs(os.path.dirname(DAEMON_LOCK), exist_ok=True)
+    lock = open(DAEMON_LOCK, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -1777,6 +1888,8 @@ _SCHEDULE_STAMP = None
 
 def reload_schedule():
     global _SCHEDULE_STAMP
+    if sync_profile():
+        load_theme();nord_theme.apply_opacity(nord_theme.opacity())
     try:
         stat=os.stat(CONFIG_FILE)
         stamp=(CONFIG_FILE,stat.st_mtime_ns,stat.st_size,datetime.now().date())
@@ -1830,7 +1943,7 @@ def widget_status(now=None):
     if not prefs['classes_progress'] and class_progress is not None:
         class_progress=None
         text=f"{short_subject(subject)} · {left}m left"
-    tips = [["STUDENTDAILY", now.strftime("%A · %d %B")]]
+    tips = [[profile_name(), now.strftime("%A · %d %B")]]
     if class_progress is not None:
         tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
     for event in dated_events:
@@ -1998,7 +2111,7 @@ E Schedule editor      R Teachers          F Search classes/teachers/tasks
 Z Join current/next (or selected) class · M Finish/undo today
 T Timer     C Class countdown               O Clock
 N Now       L Classes left                 B Breaks
-I Timezones   S Import/export   Y Settings
+I Timezones   S Import/export   Y Settings   [ Calendars
 P Separate window      H Help              Q Quit
 
 EDITING
@@ -2066,16 +2179,16 @@ def wrapped_buttons(items, width, active=None):
 def dashboard_header(now,date,view,cols,notice):
     import textwrap
     width=max(16,min(94,cols-4))
-    left="STUDENTDAILY / "+date.strftime("%a %d %b").upper()
+    left=profile_name()+" / "+date.strftime("%a %d %b").upper()
     if nord_theme.options("classes")["classes_week_numbers"]:left+=f" · W{date.isocalendar().week:02d}"
     clocks=timezone_text(now)
     if len(left)+len(clocks)+2<=width:
         rows=["  "+c(TEXT,left)+" "*(width-len(left)-len(clocks))+c(DIM,clocks)]
     else:
-        rows=["  "+c(TEXT,left)]+["  "+c(DIM,line) for line in textwrap.wrap(clocks,width=width)]
+        rows=["  "+c(TEXT,line) for line in textwrap.wrap(left,width=width)]+["  "+c(DIM,line) for line in textwrap.wrap(clocks,width=width)]
     rows.append("  "+c(DIM,"─"*width));hits={}
     active={"day":"d","week":"w","tasks":"u","teachers":"r"}.get(view)
-    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Settings")],active),
+    for items,chosen in [([("d","Today"),("w","Week"),("u","To-do"),("r","Teachers"),("e","Schedule"),("i","Zones"),("f","Search"),("s","Data"),("y","Settings"),("[","Calendars")],active),
                          ([(str(i+1),day[:3].title()) for i,day in enumerate(WEEKDAYS)]+[("g","Date")],str(date.weekday()+1) if view=="day" and date.weekday()<5 else None)]:
         buttons,maps=wrapped_buttons(items,width,chosen)
         hits.update({len(rows)+i:v for i,v in maps.items()});rows.extend(buttons)
@@ -2262,10 +2375,12 @@ def dashboard():
             elif key in ("w","u","r","h","?","n","l","b"):
                 view = {"w":"week","u":"tasks","r":"teachers","h":"help","?":"help","n":"now","l":"left","b":"free"}[key]
                 selected=-1
-            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y"):
+            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","["):
                 sys.stdout.write(MOUSE_OFF+"\033[2J\033[H\033[?25h"+BASE_STYLE)
                 try:
-                    if key=="s":
+                    if key=="[":
+                        profiles_menu();selected=-1;query=""
+                    elif key=="s":
                         data_menu()
                     elif key=="y":
                         nord_theme.settings("classes")
@@ -2308,7 +2423,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key in ("y","e","i","s","a","x","v"):sys.stdout.write("\033[?1049h")
+                if key in ("y","e","i","s","a","x","v","["):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass
@@ -2322,6 +2437,8 @@ def main():
     argv = sys.argv[1:]
     if argv == ["--version"]:
         print("StudentDaily "+nord_theme.VERSION);return
+    if argv == ["calendars"]:
+        profiles_menu();return
     if argv == ["settings"]:
         nord_theme.settings("classes")
         return
