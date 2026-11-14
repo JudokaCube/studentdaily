@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.8'
+VERSION = '0.1.9'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -182,7 +182,11 @@ def terminal_session():
 
 def run_screen(screen):
  import curses
- with terminal_session():return curses.wrapper(screen)
+ def responsive_screen(window):
+  # Escape also prefixes terminal key sequences; keep a short decoding window.
+  curses.set_escdelay(25)
+  return screen(window)
+ with terminal_session():return curses.wrapper(responsive_screen)
 
 def kitty_launch_options():
  """Use an isolated app window; no global Kitty configuration is changed."""
