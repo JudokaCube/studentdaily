@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 # Load StudentDaily helpers beside this executable, including source runs.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -40,7 +41,7 @@ TASK_FILE = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.
 
 def atomic_json(path, data):
     import tempfile
-    directory = os.path.dirname(path)
+    directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     temp = None
     try:
@@ -852,11 +853,13 @@ def export_bundle(path):
 def validate_bundle(data):
     if not isinstance(data,dict):raise ValueError('Expected a data object')
     if data.get('format','nord-classes')!='nord-classes' or data.get('version',1)!=1:raise ValueError('Unsupported export format')
-    validate_config(data['schedule'])
+    data['schedule']=validate_config(data['schedule'])
     zones=data.get('timezones',[])
     if not isinstance(zones,list):raise ValueError('Invalid timezones')
     for zone in zones:
+        if not isinstance(zone,dict):raise ValueError('Invalid timezone entry')
         if not isinstance(zone.get('label'),str) or not zone['label'].strip():raise ValueError('Timezone label required')
+        if not isinstance(zone.get('zone'),str):raise ValueError('Timezone identifier required')
         ZoneInfo(zone['zone'])
     tasks=data.get('tasks',{})
     if not isinstance(tasks,dict):raise ValueError('Invalid tasks')
@@ -1079,14 +1082,11 @@ def _fg(hexcode):
 
 
 def load_theme():
-    global BASE_STYLE
+    global BASE_STYLE, ACCENT, NOW, NEXT, ROOM, DIM, TEXT
     palette=nord_theme.palette()
-    bg=palette['background']
     BASE_STYLE="\033[49m\033["+_fg(palette['text'])+"m"
     if UI_ACTIVE:nord_theme.terminal_palette(palette)
-    colors=dict(zip(('ACCENT','NOW','NEXT','ROOM','DIM','TEXT'),(palette['accent'],palette.get('active',palette['green']),nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text'])))
-    for name, color in colors.items():
-        globals()[name] = _fg(color)
+    ACCENT,NOW,NEXT,ROOM,DIM,TEXT=map(_fg,(palette['accent'],palette.get('active',palette['green']),nord_theme.personal_color(),palette['surface'],palette['dim'],palette['text']))
 
 
 def c(code, text):
