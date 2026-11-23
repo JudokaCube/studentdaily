@@ -1,6 +1,6 @@
 pkgbase = studentdaily
 	pkgdesc = Class and personal-event organizer with reminders and desktop widgets
-	pkgver = 0.1.12
+	pkgver = 0.1.13
 	pkgrel = 1
 	url = https://github.com/JudokaCube/studentdaily
 	arch = any
@@ -16,7 +16,7 @@ pkgbase = studentdaily
 	optdepends = waybar: optional desktop bar
 	optdepends = quickshell: optional Caelestia widget
 	optdepends = qt6-declarative: optional Caelestia QML integration
-	source = studentdaily-0.1.12.tar.gz::https://github.com/JudokaCube/studentdaily/releases/download/v0.1.12/studentdaily-0.1.12.tar.gz
-	sha256sums = e8de5aea269afc21f3e04b2eedc15621b90ea1323a93697d265eb381d5317153
+	source = studentdaily-0.1.13.tar.gz::https://github.com/JudokaCube/studentdaily/releases/download/v0.1.13/studentdaily-0.1.13.tar.gz
+	sha256sums = b884629c22b912fc083d389c790ffaa70589345796eee31b3b8720876408b0b6
 
 pkgname = studentdaily

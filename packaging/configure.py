@@ -119,8 +119,7 @@ def configure_aliases(components):
             for alias,target in pairs:
                 content+=f'unalias {alias} 2>/dev/null || true\n'
                 content+=('unfunction ' if shell=='zsh' else 'unset -f ')+alias+' 2>/dev/null || true\n'
-                dashboard='menu' if component=='classes' else '--overview'
-                content+=f'{alias}() {{ if [ "$#" -eq 0 ] || {{ [ "$#" -eq 1 ] && [ "$1" = "{dashboard}" ]; }}; then exec "$HOME/.local/bin/{target}" "$@"; else "$HOME/.local/bin/{target}" "$@"; fi; }}\n'
+                content+=f'{alias}() {{ "$HOME/.local/bin/{target}" "$@"; }}\n'
             content+='# END '+tag+'\n';rc.write_text(content)
 
 

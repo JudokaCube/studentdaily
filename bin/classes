@@ -44,12 +44,15 @@ def atomic_json(path, data):
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     temp = None
+    track=globals().get("UNDO_ENABLED",False) and not _UNDO_RESTORING and str(Path(path).absolute()) in _undo_paths()
+    before=Path(path).read_bytes() if track and Path(path).exists() else None
     try:
         with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as f:
             temp = f.name
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(temp, path)
+        if track:_undo_record(path,before,Path(path).read_bytes())
     finally:
         if temp and os.path.exists(temp):
             os.unlink(temp)
@@ -75,7 +78,9 @@ def sync_profile():
     _ACTIVE_PROFILE=identity
     return True
 
-sync_profile()
+_STARTUP_ERROR=None
+try:sync_profile()
+except (OSError,ValueError,TypeError) as exc:_STARTUP_ERROR=exc
 
 def profile_name():
     return nord_theme.profile_registry()['profiles'].get(_ACTIVE_PROFILE,'Calendar')
@@ -312,6 +317,14 @@ def validate_config(data):
     data = migrate_config(data)
     if not isinstance(data.get("series"), list) or not isinstance(data.get("exceptions"), dict):
         raise ValueError("Invalid schedule format")
+    breaks=data.get('breaks',[])
+    if not isinstance(breaks,list):raise ValueError('Invalid breaks list')
+    identities=set()
+    for pause in breaks:
+        if not isinstance(pause,dict) or any(not isinstance(pause.get(k),str) or not pause[k].strip() or not pause[k].isprintable() for k in ('id','name','from','until')):raise ValueError('A break needs a name and YYYY-MM-DD dates')
+        if pause['id'] in identities:raise ValueError('Duplicate break ID')
+        identities.add(pause['id'])
+        if valid_date(pause['until'])<valid_date(pause['from']):raise ValueError('Last day must be on or after first day')
     for series in data["series"]:
         validate_event(series)
         if not isinstance(series.get("days"), list) or not series["days"] or any(
@@ -361,7 +374,9 @@ def events_on(date, data=None):
     data = DATA if data is None else data
     stamp = date.isoformat()
     events = {}
+    paused=bool(breaks_on(date,data))
     for series in data["series"]:
+        if series.get("kind","class")=="class" and paused:continue
         if (date.weekday() in series["days"] and series["from"] <= stamp
                 and (not series.get("until") or stamp <= series["until"])):
             events[series["id"]] = copy.deepcopy(series)
@@ -456,6 +471,10 @@ def edit_schedule_text(initial_date=None):
                 if action == "q":
                     return
                 if action == "s":
+                    conflicts=new_conflicts(DATA,data)
+                    if conflicts:
+                        print('Overlapping events:\n'+'\n'.join(conflicts))
+                        if input('Save anyway? [y/N]: ').strip().lower()!='y':continue
                     save_config(data)
                     load_config()
                     print("Saved. Dashboard, reminders, and widget use these changes.")
@@ -578,7 +597,10 @@ def edit_schedule(initial_date=None, add_new=False):
             stamp=date.isoformat();scope='once';focus=0;scroll=0;notice='';confirm=False;replace=True
             repeat=any(s['id']==event['id'] for s in DATA['series'])
             scopes=['once','new'] if new else ['once','future','all'] if repeat else ['once']
+            draft_undo=[];previous=(copy.deepcopy(event),stamp,scope)
             while True:
+                current=(copy.deepcopy(event),stamp,scope)
+                if current!=previous:draft_undo.append(previous);draft_undo=draft_undo[-100:];previous=current
                 rows=event_form_rows(event,scope,new);focus=min(focus,len(rows)-1)
                 h,w=win.getmaxyx();win.erase();nord_theme.menu_frame(curses,win)
                 if h<12 or w<45:
@@ -601,7 +623,7 @@ def edit_schedule(initial_date=None, add_new=False):
                 summary=('Only '+stamp+' changes; other dates stay unchanged.' if scope=='once' else
                          'Weekly: '+', '.join(DAYS[d].capitalize()[:3] for d in event['days'])+' · '+('from '+stamp if scope in ('new','future') else 'entire series'))
                 put(3,summary,curses.color_pair(1))
-                put(h-3,notice or ('Enter opens choices · Ctrl+S saves · Esc cancels'),curses.color_pair(1))
+                put(h-3,notice or ('Enter choices · Ctrl+S saves · Ctrl+Z undo · Esc cancels'),curses.color_pair(1))
                 put(h-2,f'{focus+1}/{len(rows)} · Click a field to edit; click Save when ready')
                 win.refresh();key=keypress();mouse=click(key)
                 if mouse:
@@ -610,6 +632,10 @@ def edit_schedule(initial_date=None, add_new=False):
                     elif 4<=y<4+min(size,len(rows)-scroll):
                         focus=scroll+y-4;replace=True;key='\n'
                     else:continue
+                if key=='\x1a':
+                    if draft_undo:event,stamp,scope=copy.deepcopy(draft_undo.pop());previous=(copy.deepcopy(event),stamp,scope);notice='Draft change undone.'
+                    else:notice='Nothing to undo in this draft.'
+                    continue
                 if key in ('\x1b','\x03'):return
                 if key in (curses.KEY_DOWN,'\t',curses.KEY_UP,curses.KEY_BTAB):
                     focus=(focus+(-1 if key in (curses.KEY_UP,curses.KEY_BTAB) else 1))%len(rows);replace=True;confirm=False;continue
@@ -656,6 +682,7 @@ def edit_schedule(initial_date=None, add_new=False):
                             if link_scope=='subject':candidate=apply_subject_link(candidate,event['subject'],event.get('url',''))
                         # Refuse to overwrite another open editor's changes.
                         if (Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else b'')!=baseline:raise ValueError('Schedule changed elsewhere. Cancel and reopen this editor.')
+                        if field=='save' and not confirm_conflicts(candidate,win):continue
                         save_config(candidate);load_config()
                         return 'Deleted.' if field=='delete' else 'Saved.'
                     except (ValueError,OSError,KeyError,TypeError) as exc:notice=str(exc);confirm=False
@@ -705,6 +732,10 @@ def edit_schedule(initial_date=None, add_new=False):
                     except ValueError:date_input='';message='Use YYYY-MM-DD'
                 elif key in (curses.KEY_BACKSPACE,'\x7f','\b'):date_input=date_input[:-1]
                 elif isinstance(key,str) and key.isprintable():date_input+=key
+                continue
+            if key=='\x1a':
+                try:message=undo_last();load_config()
+                except (ValueError,OSError) as exc:message=str(exc)
                 continue
             if key in ('\x1b','\x03','q'):return
             if key not in ('\n','\r'):restore=False
@@ -885,7 +916,10 @@ def validate_bundle(data):
     return data
 
 
-def import_bundle(path,mode='merge'):
+def import_bundle(path,mode='merge',warn=False):
+    with undo_group():return _import_bundle(path,mode,warn)
+
+def _import_bundle(path,mode='merge',warn=False):
     import copy
     from pathlib import Path
     try:incoming=validate_bundle(json.loads(Path(path).read_text()))
@@ -894,6 +928,8 @@ def import_bundle(path,mode='merge'):
     if mode=='replace':schedule=copy.deepcopy(incoming['schedule']);tasks=incoming.get('tasks',{});zones=incoming.get('timezones',[])
     else:
         load_config();schedule=copy.deepcopy(DATA)
+        pauses={b['id']:b for b in schedule.get('breaks',[])};pauses.update({b['id']:b for b in incoming['schedule'].get('breaks',[])})
+        if pauses:schedule['breaks']=list(pauses.values())
         incoming_ids={s['id'] for s in incoming['schedule']['series']}
         schedule['series']=[s for s in schedule['series'] if s['id'] not in incoming_ids]+copy.deepcopy(incoming['schedule']['series'])
         for date,changes in incoming['schedule']['exceptions'].items():schedule['exceptions'].setdefault(date,{}).update(changes)
@@ -902,6 +938,7 @@ def import_bundle(path,mode='merge'):
             combined={t['id']:t for t in tasks.get(date,[])};combined.update({t['id']:t for t in items});tasks[date]=list(combined.values())
         combined={z['zone']:z for z in load_timezones()};combined.update({z['zone']:z for z in incoming.get('timezones',[])});zones=list(combined.values())
     validate_config(schedule)
+    if warn and not confirm_conflicts(schedule):return False
     completed={} if mode=='replace' else load_completed()
     for date,keys in incoming.get('completed',{}).items():completed[date]=sorted(set(completed.get(date,[]))|set(keys))
     writes={CONFIG_FILE:schedule,TASK_FILE:tasks,TIMEZONE_FILE:zones,completion_file():completed}
@@ -1018,7 +1055,7 @@ def data_menu():
                 mode=choose_menu('HOW SHOULD DATA BE IMPORTED?', [('merge','Merge with current data','Retains other existing entries; matching IDs are updated.'),('replace','Replace current data','Replaces the data categories present in the file.')])
                 if mode is None:continue
                 if mode=='replace' and choose_menu('REPLACE EXISTING DATA?', [('cancel','Cancel'),('replace','Replace with this file')])!='replace':continue
-                import_bundle(path,mode);notice='Import complete.'
+                result=import_bundle(path,mode,warn=True);notice='Import cancelled.' if result is False else 'Import complete.'
         except (ValueError,OSError,KeyError,TypeError) as exc:notice='Could not complete: '+str(exc)
         choose_menu('STUDENTDAILY / DATA', [('back','Back',notice)])
 
@@ -1053,7 +1090,172 @@ def open_event(event):
     return f"Opening {event['subject']}…"
 
 
-load_config()
+# Undo history stays in memory, separated by calendar; never create backup files.
+UNDO_ENABLED=False
+_UNDO={}
+_UNDO_GROUP=None
+_UNDO_RESTORING=False
+
+def _undo_paths():
+    return {str(Path(p).absolute()) for p in (CONFIG_FILE,TASK_FILE,TIMEZONE_FILE,completion_file(),nord_theme.SETTINGS,nord_theme.SETTINGS.parent/'preferences.json')}
+
+def _undo_record(path,before,after):
+    if not UNDO_ENABLED or _UNDO_RESTORING or before==after or str(Path(path).absolute()) not in _undo_paths():return
+    path=str(Path(path).absolute())
+    if _UNDO_GROUP is not None:
+        previous=_UNDO_GROUP.get(path,(before,after));_UNDO_GROUP[path]=(previous[0],after)
+    else:
+        stack=_UNDO.setdefault(_ACTIVE_PROFILE,[]);stack.append({path:(before,after)});del stack[:-30]
+
+from contextlib import contextmanager
+@contextmanager
+def undo_group():
+    global _UNDO_GROUP
+    if _UNDO_GROUP is not None:
+        yield;return
+    changes={};_UNDO_GROUP=changes
+    try:
+        yield
+    except BaseException:
+        raise
+    else:
+        changes={p:v for p,v in changes.items() if v[0]!=v[1]}
+        if changes:
+            stack=_UNDO.setdefault(_ACTIVE_PROFILE,[]);stack.append(changes);del stack[:-30]
+    finally:_UNDO_GROUP=None
+
+def undo_last():
+    global _UNDO_RESTORING
+    stack=_UNDO.get(_ACTIVE_PROFILE,[])
+    if not stack:return 'Nothing to undo in this calendar.'
+    change=stack[-1]
+    for path,(_,expected) in change.items():
+        current=Path(path).read_bytes() if Path(path).exists() else None
+        if current!=expected:raise ValueError('Data changed in another window. Undo stopped to protect those changes.')
+    _UNDO_RESTORING=True
+    restored=[]
+    try:
+        for path,(before,after) in change.items():
+            if before is None:Path(path).unlink(missing_ok=True)
+            else:nord_theme._write_bytes(Path(path),before)
+            restored.append(path)
+    except OSError:
+        for path in restored:
+            after=change[path][1]
+            if after is None:Path(path).unlink(missing_ok=True)
+            else:nord_theme._write_bytes(Path(path),after)
+        raise
+    finally:_UNDO_RESTORING=False
+    stack.pop();load_config();load_theme()
+    return 'Last change undone.'
+
+def breaks_on(date,data=None):
+    data=DATA if data is None else data
+    stamp=date.isoformat()
+    return [b for b in data.get('breaks',[]) if b['from']<=stamp<=b['until']]
+
+def new_conflicts(before,after):
+    """Find new overlaps, including future recurrence starts and exceptions."""
+    dates={valid_date(d) for d in after['exceptions']}
+    series=after['series']
+    for i,a in enumerate(series):
+        for b in series[i+1:]:
+            if a['id']==b['id'] or max(a['start'],b['start'])>=min(a['end'],b['end']):continue
+            low=valid_date(max(a['from'],b['from']));high=valid_date(min(a.get('until') or '9999-12-31',b.get('until') or '9999-12-31'))
+            for weekday in set(a['days'])&set(b['days']):
+                ordinal=low.toordinal()+(weekday-low.weekday())%7
+                while ordinal<=high.toordinal():
+                    date=datetime.fromordinal(ordinal).date();stamp=date.isoformat()
+                    pauses=breaks_on(date,after) if a.get('kind','class')=='class' or b.get('kind','class')=='class' else []
+                    if pauses:
+                        ordinal=max(valid_date(p['until']).toordinal() for p in pauses)+1
+                        if ordinal>high.toordinal():break
+                        ordinal+=(weekday-datetime.fromordinal(ordinal).weekday())%7;continue
+                    dates.add(date)
+                    if stamp not in after['exceptions']:break
+                    ordinal+=7
+    def pairs(data,date):
+        events=events_on(date,data);result={}
+        for i,a in enumerate(events):
+            for b in events[i+1:]:
+                if max(a['start'],b['start'])<min(a['end'],b['end']):
+                    key=tuple(sorted((a['id'],b['id'])))+(a['start'],a['end'],b['start'],b['end'])
+                    result[key]=f"{date}: {a['subject']} {a['start']}–{a['end']} / {b['subject']} {b['start']}–{b['end']}"
+        return result
+    warnings=[];seen=set()
+    for date in sorted(dates):
+        old=pairs(before,date)
+        for key,message in pairs(after,date).items():
+            if key not in old and key not in seen:warnings.append(message);seen.add(key)
+            if len(warnings)>=20:return warnings
+    return warnings
+
+def confirm_conflicts(candidate,win=None):
+    warnings=new_conflicts(DATA,candidate)
+    if not warnings:return True
+    return choose_menu('OVERLAPPING EVENTS', [('back','Back to editing','Check the times before saving.'),('save','Save anyway','Overlapping events are allowed.')]+[('detail',message,message) for message in warnings], 'Overlaps found · select a row to read its details',win=win)=='save'
+
+def break_form(existing=None):
+    import curses,copy
+    draft=copy.deepcopy(existing) if existing else {'id':new_id(),'name':'School break','from':datetime.now().date().isoformat(),'until':datetime.now().date().isoformat()}
+    def screen(win):
+        curses.raw();curses.curs_set(0);win.keypad(True);curses.start_color();curses.use_default_colors();curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        cursor=0;replace=True;notice='';fields=[('name','Name'),('from','First day'),('until','Last day')]
+        while True:
+            nord_theme.curses_colors(curses,win);win.erase();h,w=win.getmaxyx();nord_theme.menu_frame(curses,win)
+            def put(y,text,style=0):
+                if 0<=y<h-1:
+                    try:win.addnstr(y,2,text,max(0,w-4),style)
+                    except curses.error:pass
+            if h<12 or w<48:
+                put(1,'Enlarge to 48 × 12. Esc returns.');win.refresh()
+                if win.getch()==27:return None
+                continue
+            put(1,'BREAKS / HOLIDAYS');put(2,'Recurring classes pause; personal and one-off events stay.')
+            for i,(key,label) in enumerate(fields):put(4+i,label+': '+draft[key],curses.color_pair(2) if cursor==i else 0)
+            put(8,'[ Save ]    [ Delete ]    [ Cancel ]',curses.color_pair(1));put(h-3,notice);put(h-2,'Tab/↑↓ move · Type to replace · Ctrl+S Save · Ctrl+D Delete · Esc Back')
+            win.refresh()
+            try:key=win.get_wch()
+            except curses.error:continue
+            if key==curses.KEY_MOUSE:
+                try:_,x,y,_,state=curses.getmouse()
+                except curses.error:continue
+                if not state&(curses.BUTTON1_CLICKED|curses.BUTTON1_PRESSED):continue
+                if 4<=y<=6:cursor=y-4;replace=True;continue
+                if y==8:key='\x13' if 2<=x<10 else '\x04' if 14<=x<24 else '\x1b'
+            if key in ('\x1b','\x03'):return None
+            if key in ('\x04',) and existing:return 'delete'
+            if key=='\x13':
+                try:
+                    candidate={**DATA,'breaks':[b for b in DATA.get('breaks',[]) if b['id']!=draft['id']]+[draft]}
+                    validate_config(candidate);return draft
+                except (ValueError,KeyError,TypeError) as exc:notice=str(exc)
+            elif key in ('\t',curses.KEY_DOWN,curses.KEY_UP,curses.KEY_BTAB,'\n','\r'):
+                cursor=(cursor+(-1 if key in (curses.KEY_UP,curses.KEY_BTAB) else 1))%3;replace=True
+            elif key in (curses.KEY_BACKSPACE,'\x7f','\b'):draft[fields[cursor][0]]='' if replace else draft[fields[cursor][0]][:-1];replace=False
+            elif key=='\x15':draft[fields[cursor][0]]='';replace=False
+            elif isinstance(key,str) and key.isprintable():draft[fields[cursor][0]]=key if replace else draft[fields[cursor][0]]+key;replace=False
+    return nord_theme.run_screen(screen)
+
+def breaks_menu():
+    while True:
+        load_config()
+        rows=[('add','+ Add break or holiday','Inclusive dates; affects recurring classes only.')]+[(b['id'],b['name'],b['from']+' → '+b['until']) for b in DATA.get('breaks',[])]
+        selected=choose_menu('BREAKS / HOLIDAYS',rows,'Select a break to edit or delete it.')
+        if selected is None:return
+        baseline=Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else None
+        old=next((b for b in DATA.get('breaks',[]) if b['id']==selected),None)
+        result=break_form(old)
+        if result is None:continue
+        if result=='delete' and choose_menu('DELETE BREAK?', [('keep','Keep break'),('delete','Delete break')])!='delete':continue
+        if (Path(CONFIG_FILE).read_bytes() if Path(CONFIG_FILE).exists() else None)!=baseline:raise ValueError('Schedule changed elsewhere. Reopen Breaks to edit.')
+        candidate={**DATA,'breaks':[b for b in DATA.get('breaks',[]) if old is None or b['id']!=old['id']]}
+        if result!='delete':candidate['breaks'].append(result)
+        if not confirm_conflicts(candidate):continue
+        save_config(candidate);load_config()
+
+try:load_config()
+except (OSError,ValueError,KeyError,TypeError) as exc:_STARTUP_ERROR=exc
 
 
 def periods_for(day):
@@ -1639,6 +1841,7 @@ class RawKeys:
             import tty
             self.old = termios.tcgetattr(self.fd)
             tty.setcbreak(self.fd, termios.TCSANOW)
+            mode=termios.tcgetattr(self.fd);mode[6][termios.VSUSP]=b"\x00";termios.tcsetattr(self.fd,termios.TCSANOW,mode)
         return self
 
     def __exit__(self, *exc):
@@ -2009,6 +2212,7 @@ def day_panel(date, selected=-1, now_sec=None):
     is_today = date == datetime.now().date()
     seconds = now_seconds(None) if now_sec is None else now_sec
     content, targets = [], {}
+    for pause in breaks_on(date):content.append(c(DIM,"Holiday: "+pause["name"]+" · recurring classes paused"))
     completed=load_completed()
     prefs=nord_theme.options("classes")
     for i, event in enumerate(events):
@@ -2118,7 +2322,7 @@ Z Join current/next (or selected) class · M Finish/undo today
 T Timer     C Class countdown               O Clock
 N Now       L Classes left                 B Breaks
 I Timezones   S Import/export   Y Settings   [ Calendars
-. More tools   + Add event
+. More tools   + Add event   Ctrl+Z Undo (this session)
 Tab selects an event or task; footer actions apply to that selection.
 P Separate window      H Help          Q/Esc Quit
 
@@ -2230,13 +2434,14 @@ def dashboard_footer(view,cols,events=None,tasks=None,selected=-1,date=None):
     if (view=='day' and events) or (view=='tasks' and tasks):
         hint='Tab select · ↑↓ scroll'
         rows.append(' '*max(2,(cols-len(hint))//2)+c(DIM,hint))
+    if _UNDO.get(_ACTIVE_PROFILE):rows.append(' '*max(2,(cols-25)//2)+c(DIM,'Ctrl+Z · Undo last change'))
     return rows,hits
 
 
 def more_menu():
     return choose_menu('STUDENTDAILY / MORE',[
         ('r','Teachers'),('i','Timezones'),('f','Search'),('s','Import / export'),('y','Settings'),
-        ('!','Check for app updates'),('e','Edit schedule'),('g','Go to date'),('t','Timer'),('c','Class countdown'),('o','Clock')],
+        ('\x1a','Undo last change · Ctrl+Z'),('B','Breaks / holidays'),('!','Check for app updates'),('e','Edit schedule'),('g','Go to date'),('t','Timer'),('c','Class countdown'),('o','Clock')],
         'Arrows or mouse to choose · Enter open · Esc back')
 
 
@@ -2256,10 +2461,24 @@ def task_summary(date):
     return panel("YOUR DAY",lines).splitlines()
 
 
+@contextmanager
+def undo_keys():
+    # Keep Ctrl+Z available even between dashboard redraws and input reads.
+    import termios
+    enabled=sys.stdin.isatty()
+    if enabled:
+        fd=sys.stdin.fileno();old=termios.tcgetattr(fd);mode=termios.tcgetattr(fd)
+        mode[6][termios.VSUSP]=b"\x00";termios.tcsetattr(fd,termios.TCSANOW,mode)
+    try:yield
+    finally:
+        if enabled:termios.tcsetattr(fd,termios.TCSANOW,old)
+
+@undo_keys()
 @nord_theme.terminal_session()
 def dashboard():
-    global UI_ACTIVE
+    global UI_ACTIVE,UNDO_ENABLED
     UI_ACTIVE = True
+    UNDO_ENABLED = True
     view, date, query, offset = nord_theme.options("classes")["classes_start_view"], datetime.now().date(), "", 0
     follow_today, selected, notice = True, -1, ""
     sys.stdout.write("\033[?1049h\033[?25l"+BASE_STYLE+MOUSE_ON)
@@ -2370,6 +2589,10 @@ def dashboard():
                 except (KeyboardInterrupt,EOFError):key=None
                 finally:sys.stdout.write('\033[?1049h\033[?25l\033[2J\033[H'+BASE_STYLE+MOUSE_ON)
                 if key is None:continue
+            if key=="\x1a":
+                try:notice=undo_last();selected=-1;offset=0
+                except (OSError,ValueError) as exc:notice=str(exc)
+                continue
             if key in ("q","\x1b"):
                 break
             if key in (KEY_DOWN,"j","\x1b[6~"):
@@ -2415,10 +2638,11 @@ def dashboard():
             elif key in ("w","u","r","h","?","n","l","b"):
                 view = {"w":"week","u":"tasks","r":"teachers","h":"help","?":"help","n":"now","l":"left","b":"free"}[key]
                 selected=-1
-            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","[","+","!"):
+            elif key in ("e","t","f","c","o","p","a","x","v","g","i","s","y","[","+","!","B"):
                 sys.stdout.write(MOUSE_OFF+"\033[2J\033[H\033[?25h"+BASE_STYLE)
                 try:
-                    if key=="!":
+                    if key=="B":breaks_menu()
+                    elif key=="!":
                         if nord_theme.check_app_updates(SELF):pin(1);break
                     elif key=="[":
                         profiles_menu();selected=-1;query=""
@@ -2465,7 +2689,7 @@ def dashboard():
                     pass
                 except (ValueError,OSError) as exc:
                     notice=str(exc)
-                if key in ("y","e","i","s","a","x","v","[","+","!"):sys.stdout.write("\033[?1049h")
+                if key in ("y","e","i","s","a","x","v","[","+","!","B"):sys.stdout.write("\033[?1049h")
                 sys.stdout.write("\033[?25l\033[2J\033[H"+BASE_STYLE+MOUSE_ON)
     except (KeyboardInterrupt,EOFError):
         pass
@@ -2476,6 +2700,9 @@ def dashboard():
 
 
 def main():
+    global UNDO_ENABLED
+    if _STARTUP_ERROR is not None:raise _STARTUP_ERROR
+    UNDO_ENABLED=sys.stdin.isatty() and sys.stdout.isatty()
     argv = sys.argv[1:]
     if argv == ["--version"]:
         print("StudentDaily "+nord_theme.VERSION);return
@@ -2546,4 +2773,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    interactive=(not sys.argv[1:] or sys.argv[1] in ('menu','edit','data','settings','theme','timezones','calendars','timer','clock','watch'))
+    sys.exit(nord_theme.run_application(main,interactive))

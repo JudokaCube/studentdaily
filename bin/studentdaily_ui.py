@@ -3,7 +3,7 @@ import json,os,tempfile
 from pathlib import Path
 from functools import lru_cache
 APP='classes'
-VERSION = '0.1.12'
+VERSION = '0.1.13'
 APP_NAME='StudentDaily'
 THEMES={
  'Nord':('2e3440','eceff4','88c0d0','b48ead','a3b1c6','434c5e','a3be8c','bf616a'),
@@ -49,7 +49,10 @@ def profile_directory(identity):
   if not re.fullmatch(r'[a-f0-9]{32}',identity):raise ValueError('Invalid calendar ID')
  return PROFILE_ROOT if identity=='default' else PROFILE_ROOT/'profiles'/identity
 
-PROFILE_ID=profile_registry()['active']
+_BOOT_ERROR=None
+try:PROFILE_ID=profile_registry()['active']
+except (OSError,ValueError,TypeError) as exc:
+ _BOOT_ERROR=exc;PROFILE_ID='default'
 SETTINGS=profile_directory(PROFILE_ID)/'appearance.json'
 
 def activate_profile(identity):
@@ -420,6 +423,7 @@ def settings_fields(app):
   field('classes_compact','Compact event rows',yes,False,'Hide secondary teacher/duration lines; keep titles, times and progress.'),
   field('classes_task_summary','Today’s task summary',yes,True,'Show your School and Life task summary below today’s events.'),
  ]
+ fields.append(field('exit_behavior','When leaving app',[('close','Close terminal'),('terminal','Return to terminal')],'close','Applies when leaving the app, including widget and shell launches. Close ends this terminal or pane; Return leaves an interactive shell. Esc inside menus still goes back.'))
  return fields
 
 
@@ -913,3 +917,72 @@ def check_app_updates(executable):
   return app_update_dialog('APP UPDATE COMPLETE',message,[('later','Later'),('restart','Restart app')])=='restart'
  except (OSError,ValueError,KeyError,TypeError,subprocess.TimeoutExpired) as exc:
   app_update_dialog('APP UPDATE FAILED',str(exc),[('back','Back')]);return False
+
+def parent_is_shell():
+ """Only recognize a direct interactive shell on this exact terminal."""
+ import sys
+ try:
+  parent=Path('/proc')/str(os.getppid())
+  name=(parent/'comm').read_text().strip().lstrip('-')
+  if name not in ('zsh','bash','fish','sh','dash','ksh','nu'):return False
+  return os.stat(parent/'fd/0').st_rdev==os.fstat(sys.stdin.fileno()).st_rdev
+ except (OSError,ValueError):return False
+
+def finish_session(interactive):
+ """Respect the same exit preference in shell, widget and desktop launches."""
+ import sys,signal,shutil
+ if not interactive or not sys.stdin.isatty() or not sys.stdout.isatty():return
+ mode=options(APP)['exit_behavior']
+ shell_parent=parent_is_shell()
+ if mode=='terminal':
+  if shell_parent:return
+  # Only app-owned terminal processes need a new shell; embedded calls return.
+  try:parent_name=(Path('/proc')/str(os.getppid())/'comm').read_text().strip()
+  except OSError:parent_name=''
+  owned=os.environ.get(APP_NAME.upper()+'_WINDOW')=='1' or os.environ.get(APP_NAME.upper()+'_SHELL_REPLACED')=='1' or parent_name in ('kitty','foot','footclient','alacritty','wezterm-gui','gnome-terminal-','konsole','xterm','tmux: server')
+  if not owned:return
+  shell=os.environ.get('SHELL','/bin/sh')
+  if not os.path.isabs(shell) or not os.access(shell,os.X_OK):shell=shutil.which('sh') or '/bin/sh'
+  env=dict(os.environ)
+  for key in (APP_NAME.upper()+'_WINDOW',APP_NAME.upper()+'_SHELL_REPLACED'):env.pop(key,None)
+  os.execve(shell,[os.path.basename(shell)],env)
+ elif shell_parent:
+  # Direct executable launches have a waiting shell. Closing that same shell
+  # makes this terminal/pane exit too; never signal a desktop or service parent.
+  os.kill(os.getppid(),signal.SIGHUP)
+
+def error_screen(exc):
+ import sys,traceback,shutil,subprocess
+ details=''.join(traceback.format_exception(type(exc),exc,exc.__traceback__))
+ details=''.join(c for c in details if c in '\n\t' or c.isprintable())[-20000:]
+ if not sys.stdin.isatty() or not sys.stdout.isatty():
+  print(APP_NAME+': '+str(exc),file=sys.stderr);return
+ notice='The operation stopped. Review the details below; partial external actions may already have completed.'
+ while True:
+  try:choice=app_update_dialog(APP_NAME.upper()+' / ERROR',notice+'\n\n'+details,[('close','Close'),('copy','Copy details')])
+  except (KeyboardInterrupt,EOFError):return
+  except Exception:
+   print(APP_NAME+' / ERROR\n'+details,file=sys.stderr)
+   try:input('Press Enter to close…')
+   except (EOFError,KeyboardInterrupt):pass
+   return
+  if choice!='copy':return
+  command=['wl-copy'] if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wl-copy') else ['xclip','-selection','clipboard'] if os.environ.get('DISPLAY') and shutil.which('xclip') else None
+  if not command:notice='No clipboard tool available. Install wl-clipboard (Wayland) or xclip (X11).';continue
+  try:
+   result=subprocess.run(command,input=details,text=True,capture_output=True,timeout=5)
+   notice='Details copied. Review paths and event names before sharing.' if result.returncode==0 else 'Could not copy details: '+result.stderr[:200]
+  except (OSError,subprocess.TimeoutExpired) as copy_error:notice='Could not copy details: '+str(copy_error)
+
+def run_application(main,interactive):
+ try:
+  boot=globals().get('_BOOT_ERROR')
+  if boot is not None:raise boot
+  result=main()
+ except (KeyboardInterrupt,EOFError):result=130
+ except Exception as exc:
+  error_screen(exc);result=1
+ try:finish_session(interactive)
+ except (OSError,ValueError) as exc:
+  print(APP_NAME+': could not apply exit setting: '+str(exc),file=__import__('sys').stderr)
+ return result
