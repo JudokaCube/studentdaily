@@ -1474,7 +1474,7 @@ def build_output(positional, at):
 def pin(interval):
     term = os.environ.get("TERMINAL", "")
     options = [
-        ("kitty", ["kitty", *nord_theme.kitty_launch_options(), "--class", "classes", "--title", "StudentDaily", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
+        ("kitty", ["kitty", *nord_theme.kitty_launch_options(), "--class", "classes", "--title", "StudentDaily", "-o", "background=#"+nord_theme.palette()["background"], "-o", "background_opacity="+str(nord_theme.opacity()), "-o", "foreground=#"+nord_theme.palette()["text"], "-o", "close_on_child_death=yes", "-o", "window_padding_width=12", "-o", "remember_window_size=no", "-o", "initial_window_width=90c", "-o", "initial_window_height=30c", SELF, "menu"]),
         ("foot", ["foot", "--app-id=class-watch", "--window-size-chars=90x20", SELF, "menu"]),
     ]
     chosen = None
@@ -1494,6 +1494,7 @@ def pin(interval):
         return
     subprocess.Popen(
         chosen,
+        env={**os.environ,"STUDENTDAILY_WINDOW":"1"},
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -2119,7 +2120,7 @@ N Now       L Classes left                 B Breaks
 I Timezones   S Import/export   Y Settings   [ Calendars
 . More tools   + Add event
 Tab selects an event or task; footer actions apply to that selection.
-P Separate window      H Help              Q Quit
+P Separate window      H Help          Q/Esc Quit
 
 EDITING
 This occurrence only: change one date without changing the weekly schedule.
@@ -2309,7 +2310,7 @@ def dashboard():
                 sys.stdout.write("\033[H\033[2J"+clip_ansi("Window too small: enlarge it (Q quits).",max(1,cols-1)))
                 sys.stdout.flush()
                 with RawKeys() as keys:key=keys.read(.5)
-                if (key or "").lower()=="q":break
+                if (key or "").lower() in ("q","\x1b"):break
                 continue
             height = max(1,rows-len(header)-len(footer)-1)
             offset = min(max(0,offset),max(0,len(lines)-height))
@@ -2369,7 +2370,7 @@ def dashboard():
                 except (KeyboardInterrupt,EOFError):key=None
                 finally:sys.stdout.write('\033[?1049h\033[?25l\033[2J\033[H'+BASE_STYLE+MOUSE_ON)
                 if key is None:continue
-            if key=="q":
+            if key in ("q","\x1b"):
                 break
             if key in (KEY_DOWN,"j","\x1b[6~"):
                 offset += height if key=="\x1b[6~" else 1
@@ -2533,6 +2534,9 @@ def main():
         return
 
     if arg in (None, "menu") and sys.stdin.isatty() and sys.stdout.isatty():
+        desktop=bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+        if desktop and os.environ.get("STUDENTDAILY_WINDOW")!="1" and (shutil.which("kitty") or shutil.which("foot")):
+            pin(1);return
         dashboard()
         return
 
