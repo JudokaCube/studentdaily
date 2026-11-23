@@ -109,7 +109,7 @@ def configure_alternative(root,components,backend):
 
 def configure_aliases(components):
     for component in components:
-        pairs=[('classes','classes'),('class','classes'),('today','classes')] if component=='classes' else [('update','system-update')]
+        pairs=[('studentdaily','classes'),('classes','classes'),('class','classes'),('today','classes')] if component=='classes' else [('keepitnew','system-update'),('system-update','system-update'),('update','system-update')]
         tag='NORD '+component.upper()
         for shell,rc in [('zsh',USER_HOME/'.zshrc'),('bash',USER_HOME/'.bashrc')]:
             if shell=='bash' and not rc.exists():continue
@@ -119,7 +119,8 @@ def configure_aliases(components):
             for alias,target in pairs:
                 content+=f'unalias {alias} 2>/dev/null || true\n'
                 content+=('unfunction ' if shell=='zsh' else 'unset -f ')+alias+' 2>/dev/null || true\n'
-                content+=f'alias {alias}=\'"$HOME/.local/bin/{target}"\'\n'
+                dashboard='menu' if component=='classes' else '--overview'
+                content+=f'{alias}() {{ if [ "$#" -eq 0 ] || {{ [ "$#" -eq 1 ] && [ "$1" = "{dashboard}" ]; }}; then exec "$HOME/.local/bin/{target}" "$@"; else "$HOME/.local/bin/{target}" "$@"; fi; }}\n'
             content+='# END '+tag+'\n';rc.write_text(content)
 
 

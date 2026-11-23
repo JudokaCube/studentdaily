@@ -2534,9 +2534,6 @@ def main():
         return
 
     if arg in (None, "menu") and sys.stdin.isatty() and sys.stdout.isatty():
-        desktop=bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
-        if desktop and os.environ.get("STUDENTDAILY_WINDOW")!="1" and (shutil.which("kitty") or shutil.which("foot")):
-            pin(1);return
         dashboard()
         return
 
