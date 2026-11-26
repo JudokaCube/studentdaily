@@ -26,7 +26,7 @@ WATCH_INTERVAL = 1
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 WEEKDAYS = DAYS[:5]
 
-# Monday–Sunday; title times take precedence; durations are customized.
+# Monday-Sunday; title times take precedence; durations are customized.
 SCHEDULE = {day: [] for day in DAYS}
 TEACHERS = {}
 
@@ -226,7 +226,7 @@ def edit_timezones_text():
     while True:
         zones=load_timezones()
         print('\nTIMEZONES · Local time is always shown')
-        for i,item in enumerate(zones):print(f"  {i+1}. {item['label']} — {item['zone']}")
+        for i,item in enumerate(zones):print(f"  {i+1}. {item['label']} - {item['zone']}")
         print('A Add · E Edit · D Delete · S Search zone names · Q Back')
         action=input('Action: ').strip().lower()
         if action in ('q',''):return
@@ -296,7 +296,7 @@ def validate_event(event):
             raise ValueError(f"Missing {key}")
     for key in ("start", "end"):
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", event[key]):
-            raise ValueError("Use HH:MM times (00:00–23:59)")
+            raise ValueError("Use HH:MM times (00:00-23:59)")
     if event["end"] <= event["start"]:
         raise ValueError("End time must follow start time")
     for key in ("subject", "teacher", "url"):
@@ -329,7 +329,7 @@ def validate_config(data):
         validate_event(series)
         if not isinstance(series.get("days"), list) or not series["days"] or any(
                 type(d) is not int or d not in range(7 if series.get("kind")=="personal" else 5) for d in series["days"]):
-            raise ValueError("Choose repeat days (classes use Monday–Friday)")
+            raise ValueError("Choose repeat days (classes use Monday-Friday)")
         first = valid_date(series["from"])
         if series.get("until") and valid_date(series["until"]) < first:
             raise ValueError("Invalid recurrence date range")
@@ -463,7 +463,7 @@ def edit_schedule_text(initial_date=None):
             print(f"\n{date:%A %d %B %Y}")
             events = events_on(date, data)
             for i, event in enumerate(events, 1):
-                print(f" {i}. {display_time(event['start'])}–{display_time(event['end'])}  {event['subject']}")
+                print(f" {i}. {display_time(event['start'])}-{display_time(event['end'])}  {event['subject']}")
             if not events:
                 print(" Nothing scheduled.")
             action = input("\n[A] Add  [E] Edit  [D] Delete  [R] Restore date  [G] Go to date  [S] Save  [Q] Cancel: ").strip().lower()
@@ -517,7 +517,7 @@ def edit_schedule_text(initial_date=None):
                         event[key] = "" if value == "-" and key in ("url", "teacher") else value
                 if scope != "once":
                     current = ",".join(str(d+1) for d in event.get("days", [date.weekday()]))
-                    value = input(f"Repeat days 1=Mon ... 7=Sun (classes Mon–Fri) [{current}]: ").strip() or current
+                    value = input(f"Repeat days 1=Mon ... 7=Sun (classes Mon-Fri) [{current}]: ").strip() or current
                     event["days"] = sorted(set(int(d.strip())-1 for d in value.split(",")))
                 validate_event(event)
                 if scope == "new":
@@ -618,7 +618,7 @@ def edit_schedule(initial_date=None, add_new=False):
                     elif field=='days_preset':value='Choose weekdays / daily / custom'
                     elif field.startswith('day'):value='[x]' if int(field[3:]) in event['days'] else '[ ]'
                     elif field in ('save','delete','duplicate','cancel'):value=''
-                    else:value=event.get(field,'') or '—'
+                    else:value=event.get(field,'') or '-'
                     put(4+j-scroll,('› ' if focus==j else '  ')+label+('  '+value if value else ''),curses.color_pair(2) if focus==j else curses.color_pair(4) if event['kind']=='personal' else 0)
                 summary=('Only '+stamp+' changes; other dates stay unchanged.' if scope=='once' else
                          'Weekly: '+', '.join(DAYS[d].capitalize()[:3] for d in event['days'])+' · '+('from '+stamp if scope in ('new','future') else 'entire series'))
@@ -656,8 +656,8 @@ def edit_schedule(initial_date=None, add_new=False):
                     if chosen is not None:scope=chosen
                     confirm=False
                 elif field=='days_preset' and activate:
-                    patterns=[('weekdays','Weekdays · Mon–Fri'),('today','Every '+date.strftime('%A')),('custom','Keep my selected days')]
-                    if event['kind']=='personal':patterns.insert(1,('daily','Every day · Mon–Sun'))
+                    patterns=[('weekdays','Weekdays · Mon-Fri'),('today','Every '+date.strftime('%A')),('custom','Keep my selected days')]
+                    if event['kind']=='personal':patterns.insert(1,('daily','Every day · Mon-Sun'))
                     chosen=choose_menu('REPEAT PATTERN',patterns,win=win)
                     if chosen=='weekdays':event['days']=list(range(5))
                     elif chosen=='daily':event['days']=list(range(7))
@@ -715,7 +715,7 @@ def edit_schedule(initial_date=None, add_new=False):
             put(1,'STUDENTDAILY / SCHEDULE',curses.color_pair(1)|curses.A_BOLD)
             put(2,f'{date:%A %d %B %Y}   ← Previous day   Next day →')
             for i,(kind,e) in enumerate(items[offset:offset+size],offset):
-                label='[ + Add event ]' if kind=='add' else '[ Restore this date ]' if kind=='restore' else '[ Back ]' if kind=='back' else f"{display_time(e['start'])}–{display_time(e['end'])}  {e['subject']}  · {'Personal' if e.get('kind')=='personal' else 'Class'}"
+                label='[ + Add event ]' if kind=='add' else '[ Restore this date ]' if kind=='restore' else '[ Back ]' if kind=='back' else f"{display_time(e['start'])}-{display_time(e['end'])}  {e['subject']}  · {'Personal' if e.get('kind')=='personal' else 'Class'}"
                 put(4+i-offset,('› ' if i==selected else '  ')+label,curses.color_pair(2) if i==selected else curses.color_pair(4) if e and e.get('kind')=='personal' else 0)
             put(h-3,('Date: '+date_input+' · Enter go · Esc cancel') if date_input is not None else message or '↑↓ Select · Enter Edit · A Add · G Date · T Today · Esc Back',curses.color_pair(1))
             put(h-2,'Each Save applies immediately. Esc discards the open form.')
@@ -861,7 +861,7 @@ def search_all(query):
     for item in DATA['series']:
         if query in ' '.join(str(item.get(k,'')) for k in ('subject','teacher','start','end')).casefold():
             days=', '.join(DAYS[d][:3].title() for d in item['days'])
-            results.append(f"{'PERSONAL' if item.get('kind')=='personal' else 'CLASS'}   {item['subject']} · {item.get('teacher','')} · {days} {display_time(item['start'])}–{display_time(item['end'])}")
+            results.append(f"{'PERSONAL' if item.get('kind')=='personal' else 'CLASS'}   {item['subject']} · {item.get('teacher','')} · {days} {display_time(item['start'])}-{display_time(item['end'])}")
     for date,changes in DATA['exceptions'].items():
         for item in changes.values():
             if item and query in (date+' '+item['subject']+' '+item.get('teacher','')).casefold():
@@ -1180,7 +1180,7 @@ def new_conflicts(before,after):
             for b in events[i+1:]:
                 if max(a['start'],b['start'])<min(a['end'],b['end']):
                     key=tuple(sorted((a['id'],b['id'])))+(a['start'],a['end'],b['start'],b['end'])
-                    result[key]=f"{date}: {a['subject']} {a['start']}–{a['end']} / {b['subject']} {b['start']}–{b['end']}"
+                    result[key]=f"{date}: {a['subject']} {a['start']}-{a['end']} / {b['subject']} {b['start']}-{b['end']}"
         return result
     warnings=[];seen=set()
     for date in sorted(dates):
@@ -1562,7 +1562,7 @@ def render_left(now_sec, day):
     label='event' if len(events)==1 else 'events'
     out=['  '+c(ACCENT,f'{len(events)} {label} left')]
     for event in events:
-        out.append(c(NEXT if event.get("kind")=="personal" else TEXT,f"   {display_time(event['start'])}–{display_time(event['end'])}   {event['subject']}  ")+c(DIM,display_teacher(event)))
+        out.append(c(NEXT if event.get("kind")=="personal" else TEXT,f"   {display_time(event['start'])}-{display_time(event['end'])}   {event['subject']}  ")+c(DIM,display_teacher(event)))
     return '\n'.join(out)
 
 
@@ -1588,7 +1588,7 @@ def render_free(now_sec, day, is_today):
             else:
                 left = hm(s) * 60 - now_sec
                 tail = c(NEXT, f"in {fmt_delta_sec(left)}")
-        line = f"   {display_time(s)}–{display_time(e)}   {kind:<7}"
+        line = f"   {display_time(s)}-{display_time(e)}   {kind:<7}"
         out.append(line + (" " + tail if tail else ""))
     return "\n".join(out)
 
@@ -1604,8 +1604,8 @@ def render_subject(query):
         for i, cell in enumerate(TIMETABLE[day]):
             if cell and cell[0] == subject:
                 s, e = periods_for(day)[i]
-                room = cell[1] if cell[1] else "–"
-                out.append(f"   {day:<10} {display_time(s)}–{display_time(e)}   " + c(ROOM, room))
+                room = cell[1] if cell[1] else "-"
+                out.append(f"   {day:<10} {display_time(s)}-{display_time(e)}   " + c(ROOM, room))
                 count += 1
     out.append(c(DIM, f"   {count}x per week"))
     out.append("")
@@ -2161,7 +2161,7 @@ def widget_status(now=None):
         tips.append(["Progress", f"{progress_bar} {class_progress}% · {left}m left"])
     for event in dated_events:
         detail="Personal" if event.get("kind")=="personal" else display_teacher(event)
-        tips.append([f"{display_time(event['start'])}–{display_time(event['end'])}", f"{short_subject(event['subject'])} · {detail}".rstrip(" ·")])
+        tips.append([f"{display_time(event['start'])}-{display_time(event['end'])}", f"{short_subject(event['subject'])} · {detail}".rstrip(" ·")])
     if not events:
         tips.append(["Today", "No events scheduled"])
     tips.append(["Click", "Open schedule and menu"])
@@ -2226,7 +2226,7 @@ def day_panel(date, selected=-1, now_sec=None):
         join = c(ACCENT, "  [Join]") if event.get("url") and event.get("kind")!="personal" else ""
         targets[1+len(content)] = ("event", event)
         if not prefs["classes_compact"]:targets[2+len(content)] = ("event", event)
-        content.append(c(color, f"{marker} {display_time(start)}–{display_time(end)}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
+        content.append(c(color, f"{marker} {display_time(start)}-{display_time(end)}  {short_subject(subject)}") + join + c(NEXT, f"  {tag}" if tag else ""))
         duration = hm(end)-hm(start)
         detail = " · ".join(x for x in ("Personal" if event.get("kind")=="personal" else display_teacher(event), f"{duration} min") if x)
         if active:
@@ -2315,7 +2315,7 @@ HELP_TEXT = """STUDENTDAILY / QUICK GUIDE
 Click controls or use the highlighted keys. Mouse wheel / arrows scroll.
 Click a class with [Join] to open Zoom. Tab selects a class; Enter joins.
 
-D Today     W Week      1–5 Monday–Friday    G Choose date
+D Today     W Week      1-5 Monday-Friday    G Choose date
 U To-do     A Add task  Enter Toggle task   V Edit task   X Delete task
 E Schedule editor      R Teachers          F Search classes/teachers/tasks
 Z Join current/next (or selected) class · M Finish/undo today
@@ -2536,7 +2536,7 @@ def dashboard():
             shown = lines[offset:offset+height]
             footer_start = len(header)+height
             if len(lines)>height:
-                footer[-1] += f"  {offset+1}–{offset+len(shown)}/{len(lines)}"
+                footer[-1] += f"  {offset+1}-{offset+len(shown)}/{len(lines)}"
             display = header+shown+[""]*(height-len(shown))+footer
             sys.stdout.write("\033[H"+BASE_STYLE)
             for line in display[:max(1,rows-1)]:

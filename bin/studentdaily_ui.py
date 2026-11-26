@@ -40,7 +40,7 @@ def profile_registry():
  return data
 
 def validate_profile_name(name):
- if not isinstance(name,str) or not name.strip() or len(name)>60 or any(not c.isprintable() for c in name):raise ValueError('Use a calendar name of 1–60 printable characters')
+ if not isinstance(name,str) or not name.strip() or len(name)>60 or any(not c.isprintable() for c in name):raise ValueError('Use a calendar name of 1-60 printable characters')
  return name.strip()
 
 def profile_directory(identity):
@@ -107,7 +107,7 @@ def validate_custom(data):
   raise ValueError('Choose a StudentDaily theme JSON file (version 1)')
  name=data.get('name','My theme')
  if not isinstance(name,str) or not name.strip() or len(name)>60 or any(ord(c)<32 or ord(c)==127 for c in name):
-  raise ValueError('Use a theme name of 1–60 printable characters')
+  raise ValueError('Use a theme name of 1-60 printable characters')
  colors=data.get('colors')
  if not isinstance(colors,dict) or not set(CORE_ROLES)<=set(colors) or set(colors)-set(ROLE_LABELS):
   raise ValueError('Theme has missing or unknown color roles')

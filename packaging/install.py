@@ -52,7 +52,7 @@ def main():
             if not choice.isdigit() or not 1<=int(choice)<=len(names):parser.error('Invalid theme number')
             args.theme=names[int(choice)-1]
         if args.opacity is None:
-            try:args.opacity=float(input('Window opacity, 0.75–1 [0.94]: ').strip() or '.94')
+            try:args.opacity=float(input('Window opacity, 0.75-1 [0.94]: ').strip() or '.94')
             except ValueError:parser.error('Opacity must be numeric')
         args.no_aliases=input('Add convenient shell aliases? [Y/n]: ').strip().lower()=='n'
     if args.components=='classes':has_packages=False
@@ -77,7 +77,7 @@ def main():
         args.no_start=input('Start enabled services now? [Y/n]: ').strip().lower()=='n'
     if args.theme is not None and args.theme not in nord_theme.THEMES:parser.error('Unknown theme')
     if args.opacity is not None and not .75<=args.opacity<=1:parser.error('Opacity must be between .75 and 1')
-    if not 1<=args.reminder_minutes<=60 or not 5<=args.check_minutes<=1440:parser.error('Reminder minutes: 1–60; check minutes: 5–1440')
+    if not 1<=args.reminder_minutes<=60 or not 5<=args.check_minutes<=1440:parser.error('Reminder minutes: 1-60; check minutes: 5-1440')
     needed=['python3','kitty','systemctl']+(['noctalia'] if args.bar=='noctalia' else [])+(['xdg-open'] if has_classes else [])+(['pacman'] if has_packages else [])
     missing=[app for app in needed if not shutil.which(app)]
     if missing:parser.error('Install required tools first: '+', '.join(missing))
